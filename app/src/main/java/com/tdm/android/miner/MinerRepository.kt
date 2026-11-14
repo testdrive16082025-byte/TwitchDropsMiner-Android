@@ -133,8 +133,8 @@ object MinerRepository {
                     _state.update { it.copy(campaigns = campaigns) }
                     claimReadyDrops(gql, campaigns)
 
-                    val targetCampaign = pickTargetCampaign(campaigns)
-                    if (targetCampaign == null) {
+                    val orderedCampaigns = orderEligibleCampaigns(campaigns)
+                    if (orderedCampaigns.isEmpty()) {
                         _state.update {
                             it.copy(
                                 statusText = "Нет подходящих активных кампаний",
@@ -149,32 +149,48 @@ object MinerRepository {
                         continue
                     }
 
-                    val streams = try {
-                        gql.fetchLiveStreamsForCampaign(targetCampaign)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        addLog("Ошибка поиска каналов для ${targetCampaign.gameName}: ${e.message}")
-                        emptyList()
+                    var selectedCampaign: DropCampaignUi? = null
+                    var selectedStream: LiveStreamCandidate? = null
+
+                    for (camp in orderedCampaigns) {
+                        val streams = try {
+                            gql.fetchLiveStreamsForCampaign(camp)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            addLog("Ошибка поиска каналов (${camp.gameName}): ${e.message}")
+                            emptyList()
+                        }
+
+                        for (s in streams.take(10)) {
+                            val supported = gql.channelSupportsCampaign(s.channelId, camp.id)
+                            if (supported != false) {
+                                selectedCampaign = camp
+                                selectedStream = s
+                                break
+                            }
+                            addLog("Пропуск ${s.channelLogin}: дропы кампании не активны.")
+                        }
+                        if (selectedStream != null) break
                     }
 
-                    val candidate = streams.firstOrNull()
-                    if (candidate == null) {
+                    if (selectedCampaign == null || selectedStream == null) {
+                        val firstCamp = orderedCampaigns.first()
                         _state.update {
                             it.copy(
-                                statusText = "Нет онлайн-стримов: ${targetCampaign.gameName}",
+                                statusText = "Нет стримов с дропами",
                                 activeChannelLogin = null,
-                                activeGameName = targetCampaign.gameName,
-                                activeCampaignName = targetCampaign.name,
-                                activeDrop = targetCampaign.nextDrop
+                                activeGameName = firstCamp.gameName,
+                                activeCampaignName = firstCamp.name,
+                                activeDrop = firstCamp.nextDrop
                             )
                         }
-                        addLog("Для «${targetCampaign.gameName}» нет живых стримов. Пауза 2 мин.")
+                        addLog("Сейчас нет живых стримов с активными дропами. Пауза 2 мин.")
                         delay(2 * 60_000L)
                         continue
                     }
 
-                    mineStreamSession(gql, targetCampaign, candidate)
+                    mineStreamSession(gql, selectedCampaign, selectedStream)
                 }
             } catch (_: CancellationException) {
                 addLog("Майнер остановлен.")
@@ -223,25 +239,30 @@ object MinerRepository {
         }
     }
 
-    private fun pickTargetCampaign(campaigns: List<DropCampaignUi>): DropCampaignUi? {
+    private fun orderEligibleCampaigns(campaigns: List<DropCampaignUi>): List<DropCampaignUi> {
         val eligible = campaigns.filter { c ->
             c.isActive && c.hasUnclaimedDrops && c.nextDrop != null
         }
-        if (eligible.isEmpty()) return null
+        if (eligible.isEmpty()) return emptyList()
 
+        val ordered = mutableListOf<DropCampaignUi>()
         val priorities = _state.value.priorityGames
         for (game in priorities) {
-            val match = eligible.firstOrNull {
-                it.isAccountConnected && it.gameName.equals(game, ignoreCase = true)
-            } ?: eligible.firstOrNull {
-                it.gameName.equals(game, ignoreCase = true)
-            }
-            if (match != null) return match
+            ordered.addAll(
+                eligible.filter {
+                    it !in ordered && it.gameName.equals(game, ignoreCase = true)
+                }.sortedByDescending { it.isAccountConnected }
+            )
         }
 
-        if (_state.value.priorityOnly) return null
+        if (!_state.value.priorityOnly) {
+            ordered.addAll(
+                eligible.filter { it !in ordered }
+                    .sortedByDescending { it.isAccountConnected }
+            )
+        }
 
-        return eligible.firstOrNull { it.isAccountConnected } ?: eligible.firstOrNull()
+        return ordered
     }
 
     private suspend fun mineStreamSession(
@@ -269,10 +290,11 @@ object MinerRepository {
         }
 
         var tick = 0
+        var loggedChunksOnce = false
         val sessionStartMs = System.currentTimeMillis()
         while (System.currentTimeMillis() - sessionStartMs < 20 * 60_000L) {
-            val ok = gql.sendWatchHeartbeat(playlistUrl)
-            if (!ok) {
+            val chunksSent = gql.sendWatchHeartbeat(playlistUrl)
+            if (chunksSent <= 0) {
                 addLog("Поток ${stream.channelLogin} прервался, переподключение...")
                 val refreshed = gql.getLowestStreamPlaylistUrl(stream.channelLogin)
                 if (refreshed.isNullOrBlank()) {
@@ -280,25 +302,58 @@ object MinerRepository {
                     return
                 }
                 playlistUrl = refreshed
+                loggedChunksOnce = false
+            } else if (!loggedChunksOnce) {
+                addLog("Просмотр подтверждён (HEAD x$chunksSent чанков).")
+                loggedChunksOnce = true
             }
 
             tick++
-            if (tick % 3 == 0) {
+            if (tick % 3 == 0 && currentDrop != null) {
                 val progress = gql.fetchCurrentDrop(stream.channelId)
-                if (progress != null && currentDrop != null) {
+                if (progress != null) {
+                    val matchedInCampaign = campaign.drops.firstOrNull { it.id == progress.dropId }
                     if (progress.dropId == currentDrop.id) {
+                        val updatedMinutes = maxOf(currentDrop.currentMinutes, progress.currentMinutes)
+                        val changed = updatedMinutes != currentDrop.currentMinutes
                         currentDrop = currentDrop.copy(
-                            currentMinutes = progress.currentMinutes,
+                            currentMinutes = updatedMinutes,
                             requiredMinutes = if (progress.requiredMinutes > 0) progress.requiredMinutes else currentDrop.requiredMinutes
                         )
                         _state.update { it.copy(activeDrop = currentDrop) }
-                        addLog("Прогресс «${currentDrop.benefitName}»: ${currentDrop.currentMinutes}/${currentDrop.requiredMinutes} мин")
+                        if (changed) {
+                            addLog("Прогресс «${currentDrop.benefitName}»: ${currentDrop.currentMinutes}/${currentDrop.requiredMinutes} мин")
+                        }
                         if (currentDrop.currentMinutes >= currentDrop.requiredMinutes && currentDrop.requiredMinutes > 0) {
-                            addLog("Дроп готов к получению! Обновляю инвентарь и забираю...")
+                            addLog("Дроп готов к получению! Забираю...")
                             return
                         }
-                    } else {
-                        addLog("Переключение на следующий дроп кампании...")
+                    } else if (matchedInCampaign != null && !matchedInCampaign.isClaimed) {
+                        currentDrop = matchedInCampaign.copy(
+                            currentMinutes = maxOf(matchedInCampaign.currentMinutes, progress.currentMinutes)
+                        )
+                        _state.update { it.copy(activeDrop = currentDrop) }
+                        addLog("Отслеживается дроп «${currentDrop.benefitName}»: ${currentDrop.currentMinutes}/${currentDrop.requiredMinutes} мин")
+                    }
+                }
+            }
+
+            if (tick % 6 == 0 && currentDrop != null) {
+                val invSnap = gql.fetchDropProgressFromInventory(campaign.id, currentDrop.id)
+                if (invSnap != null) {
+                    val updatedMinutes = maxOf(currentDrop.currentMinutes, invSnap.currentMinutes)
+                    val changed = updatedMinutes != currentDrop.currentMinutes
+                    currentDrop = currentDrop.copy(
+                        currentMinutes = updatedMinutes,
+                        isClaimed = invSnap.isClaimed,
+                        dropInstanceId = invSnap.dropInstanceId ?: currentDrop.dropInstanceId
+                    )
+                    _state.update { it.copy(activeDrop = currentDrop) }
+                    if (changed) {
+                        addLog("Инвентарь «${currentDrop.benefitName}»: ${currentDrop.currentMinutes}/${currentDrop.requiredMinutes} мин")
+                    }
+                    if (invSnap.isClaimed || (currentDrop.requiredMinutes > 0 && currentDrop.currentMinutes >= currentDrop.requiredMinutes)) {
+                        addLog("Дроп выполнен! Обновляю и забираю...")
                         return
                     }
                 }
