@@ -3,23 +3,33 @@ package com.tdm.android.ui
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.net.Uri
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.tdm.android.network.TwitchAuthApi
 import java.util.concurrent.atomic.AtomicBoolean
+
+private const val DESKTOP_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("SetJavaScriptEnabled")
@@ -30,7 +40,11 @@ fun TwitchLoginScreen(
     onCancel: () -> Unit
 ) {
     var loadProgress by remember { mutableIntStateOf(0) }
+    var currentUrl by remember { mutableStateOf(TwitchAuthApi.OAUTH_AUTHORIZE_URL) }
+    var pageError by remember { mutableStateOf<String?>(null) }
+    var desktopMode by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var defaultMobileUa by remember { mutableStateOf("") }
     var canGoBack by remember { mutableStateOf(false) }
     val handled = remember { AtomicBoolean(false) }
 
@@ -65,16 +79,54 @@ fun TwitchLoginScreen(
         topBar = {
             Column {
                 TopAppBar(
-                    title = { Text("Вход в Twitch") },
+                    title = {
+                        Column {
+                            Text("Вход в Twitch", fontSize = 17.sp)
+                            Text(
+                                text = currentUrl,
+                                fontSize = 11.sp,
+                                color = Color(0xFFADADB8),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    },
                     navigationIcon = {
                         IconButton(onClick = onCancel) {
                             Icon(Icons.Default.Close, contentDescription = "Закрыть")
                         }
                     },
+                    actions = {
+                        IconButton(
+                            onClick = {
+                                val wv = webViewRef ?: return@IconButton
+                                desktopMode = !desktopMode
+                                wv.settings.userAgentString =
+                                    if (desktopMode) DESKTOP_USER_AGENT else defaultMobileUa
+                                pageError = null
+                                wv.loadUrl(TwitchAuthApi.OAUTH_AUTHORIZE_URL)
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Computer,
+                                contentDescription = "ПК-версия",
+                                tint = if (desktopMode) Color(0xFFBF94FF) else Color(0xFFEFEFF1)
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                pageError = null
+                                webViewRef?.reload()
+                            }
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Обновить")
+                        }
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = Color(0xFF18181B),
                         titleContentColor = Color(0xFFEFEFF1),
-                        navigationIconContentColor = Color(0xFFEFEFF1)
+                        navigationIconContentColor = Color(0xFFEFEFF1),
+                        actionIconContentColor = Color(0xFFEFEFF1)
                     )
                 )
                 if (loadProgress in 1..99) {
@@ -86,68 +138,114 @@ fun TwitchLoginScreen(
                         color = Color(0xFF9146FF)
                     )
                 }
+                if (pageError != null) {
+                    Surface(color = Color(0xFF3A161D), modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = pageError.orEmpty(),
+                            color = Color(0xFFFF8A9B),
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                    }
+                }
             }
         },
         containerColor = Color(0xFF0E0E10)
     ) { padding ->
-        AndroidView(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding),
-            factory = { context ->
-                WebView(context).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.databaseEnabled = true
-                    settings.userAgentString = settings.userAgentString.replace("; wv", "")
+                .padding(padding)
+                .imePadding()
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context ->
+                    WebView(context).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        setBackgroundColor(android.graphics.Color.parseColor("#0E0E10"))
 
-                    val cookieManager = CookieManager.getInstance()
-                    cookieManager.setAcceptCookie(true)
-                    cookieManager.setAcceptThirdPartyCookies(this, true)
+                        defaultMobileUa = settings.userAgentString.replace("; wv", "")
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.databaseEnabled = true
+                        settings.loadWithOverviewMode = true
+                        settings.useWideViewPort = true
+                        settings.javaScriptCanOpenWindowsAutomatically = true
+                        settings.setSupportMultipleWindows(false)
+                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        settings.userAgentString = defaultMobileUa
 
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                            loadProgress = newProgress
+                        val cookieManager = CookieManager.getInstance()
+                        cookieManager.setAcceptCookie(true)
+                        cookieManager.setAcceptThirdPartyCookies(this, true)
+
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                loadProgress = newProgress
+                            }
                         }
+
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): Boolean {
+                                val url = request?.url?.toString()
+                                if (checkUrl(url)) return true
+                                if (url != null && !url.startsWith("http://") && !url.startsWith("https://")) {
+                                    return true
+                                }
+                                return false
+                            }
+
+                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                if (!url.isNullOrBlank()) currentUrl = url
+                                canGoBack = view?.canGoBack() == true
+                                pageError = null
+                                checkUrl(url)
+                            }
+
+                            override fun doUpdateVisitedHistory(
+                                view: WebView?,
+                                url: String?,
+                                isReload: Boolean
+                            ) {
+                                if (!url.isNullOrBlank()) currentUrl = url
+                                canGoBack = view?.canGoBack() == true
+                                checkUrl(url)
+                            }
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                if (!url.isNullOrBlank()) currentUrl = url
+                                canGoBack = view?.canGoBack() == true
+                                checkUrl(url)
+                            }
+
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                error: WebResourceError?
+                            ) {
+                                if (request?.isForMainFrame == true) {
+                                    pageError = "Ошибка загрузки: ${error?.description ?: "неизвестно"}"
+                                }
+                            }
+                        }
+
+                        webViewRef = this
+                        loadUrl(TwitchAuthApi.OAUTH_AUTHORIZE_URL)
                     }
-
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): Boolean {
-                            return checkUrl(request?.url?.toString())
-                        }
-
-                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                            canGoBack = view?.canGoBack() == true
-                            checkUrl(url)
-                        }
-
-                        override fun doUpdateVisitedHistory(
-                            view: WebView?,
-                            url: String?,
-                            isReload: Boolean
-                        ) {
-                            canGoBack = view?.canGoBack() == true
-                            checkUrl(url)
-                        }
-
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            canGoBack = view?.canGoBack() == true
-                            checkUrl(url)
-                        }
-                    }
-
-                    webViewRef = this
-                    loadUrl(TwitchAuthApi.OAUTH_AUTHORIZE_URL)
+                },
+                onRelease = { webView ->
+                    webView.stopLoading()
+                    webView.destroy()
                 }
-            },
-            onRelease = { webView ->
-                webView.stopLoading()
-                webView.destroy()
-            }
-        )
+            )
+        }
     }
 }
 
