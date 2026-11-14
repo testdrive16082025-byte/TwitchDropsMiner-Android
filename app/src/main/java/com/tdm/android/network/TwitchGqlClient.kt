@@ -11,7 +11,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -160,16 +159,6 @@ class TwitchGqlClient(
             }
         }
 
-        val claimedBenefitTimes = mutableSetOf<String>()
-        inventoryObj?.get("gameEventDrops").asArr()?.forEach { bEl ->
-            val bObj = bEl.asObj() ?: return@forEach
-            val bId = bObj["id"].asStr()
-            val count = bObj["totalCount"].asInt() ?: 0
-            if (!bId.isNullOrBlank() && count > 0) {
-                claimedBenefitTimes.add(bId)
-            }
-        }
-
         val campResp = gqlSingle("Campaigns")
         val rawCampaigns = campResp["data"].asObj()
             ?.get("currentUser").asObj()
@@ -193,7 +182,8 @@ class TwitchGqlClient(
             val batchResp = gqlBatch(batchReq)
             for (respObj in batchResp) {
                 val cObj = respObj["data"].asObj()?.get("user").asObj()?.get("dropCampaign").asObj()
-                val cid = cObj?.get("id").asStr()
+                    ?: continue
+                val cid = cObj["id"].asStr()
                 if (!cid.isNullOrBlank()) {
                     detailsById[cid] = cObj
                 }
