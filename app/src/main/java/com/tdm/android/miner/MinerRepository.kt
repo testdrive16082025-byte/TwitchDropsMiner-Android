@@ -250,8 +250,7 @@ object MinerRepository {
         stream: LiveStreamCandidate
     ) {
         addLog("Смотрим ${stream.channelLogin} (${campaign.gameName}, зрителей: ${stream.viewers})")
-        var playlistUrl = gql.getLowestStreamPlaylistUrl(stream.channelLogin)
-        if (playlistUrl.isNullOrBlank()) {
+        var playlistUrl = gql.getLowestStreamPlaylistUrl(stream.channelLogin) ?: run {
             addLog("Не удалось получить поток ${stream.channelLogin}, ищу другой канал...")
             delay(10_000)
             return
@@ -275,11 +274,12 @@ object MinerRepository {
             val ok = gql.sendWatchHeartbeat(playlistUrl)
             if (!ok) {
                 addLog("Поток ${stream.channelLogin} прервался, переподключение...")
-                playlistUrl = gql.getLowestStreamPlaylistUrl(stream.channelLogin)
-                if (playlistUrl.isNullOrBlank()) {
+                val refreshed = gql.getLowestStreamPlaylistUrl(stream.channelLogin)
+                if (refreshed.isNullOrBlank()) {
                     addLog("Канал ${stream.channelLogin} оффлайн. Смена канала.")
                     return
                 }
+                playlistUrl = refreshed
             }
 
             tick++
