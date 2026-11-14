@@ -1,0 +1,24 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Рукоять -->
+    <path
+        android:pathData="M32,76 L63,41"
+        android:strokeWidth="6.5"
+        android:strokeColor="#D4D4D8"
+        android:strokeLineCap="round" />
+    <!-- Крепление -->
+    <path
+        android:fillColor="#772CE8"
+        android:pathData="M56,37 L67,38 L69,48 L58,47 Z" />
+    <!-- Лезвие фиолетовой кирки -->
+    <path
+        android:fillColor="#9146FF"
+        android:pathData="M34,28 Q68,26 80,74 Q60,40 34,28 Z" />
+    <!-- Блик -->
+    <path
+        android:fillColor="#BF94FF"
+        android:pathData="M38,29 Q64,30 75,65 Q61,39 38,29 Z" />
+</vector>
