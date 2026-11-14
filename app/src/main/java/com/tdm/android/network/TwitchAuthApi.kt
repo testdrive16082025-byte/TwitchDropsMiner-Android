@@ -19,11 +19,13 @@ private data class ValidateResponse(
 
 object TwitchAuthApi {
     const val ANDROID_APP_CLIENT_ID = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"
+
     const val OAUTH_AUTHORIZE_URL =
-        "https://id.twitch.tv/oauth2/authorize" +
+        "https://www.twitch.tv/login" +
             "?client_id=$ANDROID_APP_CLIENT_ID" +
-            "&redirect_uri=https%3A%2F%2Fwww.twitch.tv%2F" +
-            "&response_type=token"
+            "&redirect_params=client_id%3D$ANDROID_APP_CLIENT_ID" +
+            "%26redirect_uri%3Dhttps%253A%252F%252Fwww.twitch.tv%252F" +
+            "%26response_type%3Dtoken"
 
     private const val VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
 
