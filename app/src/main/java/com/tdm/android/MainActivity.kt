@@ -13,11 +13,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -28,12 +29,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.BatteryAlert
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Person
@@ -45,6 +44,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -56,6 +56,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -63,13 +64,18 @@ import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.tdm.android.data.AuthStorage
 import com.tdm.android.data.DropCampaignUi
+import com.tdm.android.data.LiveStreamCandidate
 import com.tdm.android.data.MinerUiState
+import com.tdm.android.data.TimedDropUi
 import com.tdm.android.data.TwitchSession
 import com.tdm.android.miner.MinerForegroundService
 import com.tdm.android.miner.MinerRepository
 import com.tdm.android.network.TwitchAuthApi
 import com.tdm.android.ui.TwitchLoginScreen
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -111,6 +117,18 @@ private enum class CampaignFilter(val label: String) {
     UNCLAIMED("Неполученные"),
     CONNECTED("Привязанные"),
     UPCOMING("Скоро")
+}
+
+private fun formatMinutesAsClock(totalMinutes: Int): String {
+    val safe = totalMinutes.coerceAtLeast(0)
+    val h = safe / 60
+    val m = safe % 60
+    return String.format(Locale.US, "%d:%02d:00", h, m)
+}
+
+private fun formatDate(epochMs: Long): String {
+    if (epochMs <= 0L) return "—"
+    return SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault()).format(Date(epochMs))
 }
 
 @Composable
@@ -400,11 +418,11 @@ private fun MinerDashboard(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "Twitch Drops Miner",
                                 fontSize = 18.sp,
@@ -414,7 +432,9 @@ private fun MinerDashboard(
                             Text(
                                 text = "${session.login} • Забрано: ${minerState.claimedSessionCount} (всего: ${minerState.totalClaimedAllTime})",
                                 fontSize = 11.sp,
-                                color = Color(0xFFADADB8)
+                                color = Color(0xFFADADB8),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                         Row {
@@ -422,42 +442,16 @@ private fun MinerDashboard(
                                 onClick = { MinerRepository.refreshCampaignsOnce(context, session) },
                                 enabled = !minerState.isRefreshing
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = "Обновить",
-                                    tint = Color(0xFFEFEFF1)
-                                )
+                                Icon(Icons.Default.Refresh, contentDescription = "Обновить", tint = Color(0xFFEFEFF1))
                             }
                             IconButton(onClick = { showSettingsDialog = true }) {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "Настройки",
-                                    tint = Color(0xFFEFEFF1)
-                                )
+                                Icon(Icons.Default.Settings, contentDescription = "Настройки", tint = Color(0xFFEFEFF1))
                             }
                             IconButton(onClick = onLogout) {
-                                Icon(
-                                    imageVector = Icons.Default.PowerSettingsNew,
-                                    contentDescription = "Выйти",
-                                    tint = Color(0xFFFF8A9B)
-                                )
+                                Icon(Icons.Default.PowerSettingsNew, contentDescription = "Выйти", tint = Color(0xFFFF8A9B))
                             }
                         }
                     }
-
-                    MinerStatusCard(
-                        minerState = minerState,
-                        isBatteryOptimized = isBatteryOptimized,
-                        onStart = ::startMinerService,
-                        onStop = ::stopMinerService,
-                        onDisableBatteryOpt = {
-                            val intent = Intent(
-                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                Uri.parse("package:${context.packageName}")
-                            )
-                            runCatching { context.startActivity(intent) }
-                        }
-                    )
 
                     TabRow(
                         selectedTabIndex = selectedTab,
@@ -467,17 +461,22 @@ private fun MinerDashboard(
                         Tab(
                             selected = selectedTab == 0,
                             onClick = { selectedTab = 0 },
-                            text = { Text("Кампании (${minerState.campaigns.size})", fontSize = 13.sp) }
+                            text = { Text("Главная", fontSize = 12.sp, maxLines = 1) }
                         )
                         Tab(
                             selected = selectedTab == 1,
                             onClick = { selectedTab = 1 },
-                            text = { Text("Приоритеты (${minerState.priorityGames.size})", fontSize = 13.sp) }
+                            text = { Text("Дропсы", fontSize = 12.sp, maxLines = 1) }
                         )
                         Tab(
                             selected = selectedTab == 2,
                             onClick = { selectedTab = 2 },
-                            text = { Text("Логи", fontSize = 13.sp) }
+                            text = { Text("Каналы (${minerState.channels.size})", fontSize = 12.sp, maxLines = 1) }
+                        )
+                        Tab(
+                            selected = selectedTab == 3,
+                            onClick = { selectedTab = 3 },
+                            text = { Text("Приоритет", fontSize = 12.sp, maxLines = 1) }
                         )
                     }
                 }
@@ -490,7 +489,21 @@ private fun MinerDashboard(
                 .padding(padding)
         ) {
             when (selectedTab) {
-                0 -> CampaignsTab(
+                0 -> MainPcStyleTab(
+                    minerState = minerState,
+                    isBatteryOptimized = isBatteryOptimized,
+                    onStart = ::startMinerService,
+                    onStop = ::stopMinerService,
+                    onDisableBatteryOpt = {
+                        val intent = Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        runCatching { context.startActivity(intent) }
+                    }
+                )
+
+                1 -> InventoryTab(
                     campaigns = minerState.campaigns,
                     priorityGames = minerState.priorityGames,
                     excludedGames = minerState.excludedGames,
@@ -501,13 +514,17 @@ private fun MinerDashboard(
                         MinerRepository.manualClaimDrop(context, session, instanceId, benefitName, gameName)
                     },
                     onOpenLink = { url ->
-                        runCatching {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                        }
+                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                     }
                 )
 
-                1 -> PrioritiesTab(
+                2 -> ChannelsTab(
+                    minerState = minerState,
+                    onRefreshChannels = { MinerRepository.refreshActiveChannels(context, session) },
+                    onSwitchChannel = { login -> MinerRepository.switchToChannel(login) }
+                )
+
+                3 -> PrioritiesTab(
                     priorityGames = minerState.priorityGames,
                     excludedGames = minerState.excludedGames,
                     onAddPriority = { MinerRepository.addPriorityGame(it) },
@@ -515,8 +532,6 @@ private fun MinerDashboard(
                     onRemovePriority = { MinerRepository.togglePriorityGame(it) },
                     onRemoveExcluded = { MinerRepository.toggleExcludedGame(it) }
                 )
-
-                2 -> LogsTab(logs = minerState.logs)
             }
         }
     }
@@ -541,119 +556,244 @@ private fun MinerDashboard(
 }
 
 @Composable
-private fun MinerStatusCard(
+private fun MainPcStyleTab(
     minerState: MinerUiState,
     isBatteryOptimized: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onDisableBatteryOpt: () -> Unit
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF202026)),
-        shape = RoundedCornerShape(12.dp),
+    Column(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp)
-            .padding(bottom = 10.dp)
+            .fillMaxSize()
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = minerState.statusText,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (minerState.isRunning) Color(0xFF00E676) else Color(0xFFEFEFF1),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (!minerState.activeGameName.isNullOrBlank()) {
-                        val viewersText = if (minerState.activeChannelViewers > 0) {
-                            " • ${minerState.activeChannelViewers} зрит."
-                        } else ""
+        // Статус + кнопка Старт/Стоп
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, Color(0xFF2B2B33)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "${minerState.activeGameName}$viewersText",
-                            fontSize = 12.sp,
-                            color = Color(0xFFBF94FF),
+                            text = minerState.statusText,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (minerState.isRunning) Color(0xFF00E676) else Color(0xFFEFEFF1),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        if (!minerState.activeGameName.isNullOrBlank()) {
+                            val viewersText = if (minerState.activeChannelViewers > 0) {
+                                " • ${minerState.activeChannelViewers} зрит."
+                            } else ""
+                            Text(
+                                text = "${minerState.activeGameName}$viewersText",
+                                fontSize = 12.sp,
+                                color = Color(0xFFBF94FF)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { if (minerState.isRunning) onStop() else onStart() },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (minerState.isRunning) Color(0xFFD32F2F) else Color(0xFF9146FF)
+                        ),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (minerState.isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (minerState.isRunning) "Стоп" else "Старт")
                     }
                 }
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = { if (minerState.isRunning) onStop() else onStart() },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (minerState.isRunning) Color(0xFFD32F2F) else Color(0xFF9146FF)
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-                ) {
-                    Icon(
-                        imageVector = if (minerState.isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (minerState.isRunning) "Стоп" else "Старт")
+
+                if (isBatteryOptimized) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TextButton(
+                        onClick = onDisableBatteryOpt,
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BatteryAlert,
+                            contentDescription = null,
+                            tint = Color(0xFFFFCA28),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Отключить контроль батареи для фона",
+                            fontSize = 12.sp,
+                            color = Color(0xFFFFCA28)
+                        )
+                    }
                 }
             }
+        }
 
-            val drop = minerState.activeDrop
-            if (drop != null && drop.requiredMinutes > 0) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+        // Блок Campaign Progress + Drop Progress (как на ПК)
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, Color(0xFF2B2B33)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Прогресс кампании",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFFADADB8)
+                )
+
+                val camp = minerState.activeCampaign
+                if (camp != null) {
+                    val campPct = camp.campaignProgressFraction * 100f
                     Text(
-                        text = drop.benefitName,
-                        fontSize = 12.sp,
+                        text = "${camp.gameName} — ${camp.name}",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
                         color = Color(0xFFEFEFF1),
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+                        overflow = TextOverflow.Ellipsis
                     )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = String.format(
+                                Locale.US,
+                                "%.1f%% (%d/%d)",
+                                campPct,
+                                camp.claimedDropsCount,
+                                camp.totalDropsCount
+                            ),
+                            fontSize = 12.sp,
+                            color = Color(0xFF00E676)
+                        )
+                        Text(
+                            text = "осталось ${formatMinutesAsClock(camp.campaignRemainingMinutes)}",
+                            fontSize = 12.sp,
+                            color = Color(0xFFADADB8)
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { camp.campaignProgressFraction },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(4.dp)),
+                        color = Color(0xFF00C853),
+                        trackColor = Color(0xFF2C2C35)
+                    )
+                } else {
                     Text(
-                        text = "${drop.currentMinutes} / ${drop.requiredMinutes} мин",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = Color(0xFFBF94FF)
+                        text = "Нет активной кампании",
+                        fontSize = 13.sp,
+                        color = Color(0xFF71717A)
                     )
                 }
-                Spacer(modifier = Modifier.height(5.dp))
-                LinearProgressIndicator(
-                    progress = { drop.progressFraction },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(6.dp),
-                    color = Color(0xFF9146FF),
-                    trackColor = Color(0xFF323239)
-                )
-            }
 
-            if (isBatteryOptimized) {
-                Spacer(modifier = Modifier.height(6.dp))
-                TextButton(
-                    onClick = onDisableBatteryOpt,
-                    contentPadding = PaddingValues(0.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.BatteryAlert,
-                        contentDescription = null,
-                        tint = Color(0xFFFFCA28),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
+                HorizontalDivider(color = Color(0xFF27272E))
+
+                val drop = minerState.activeDrop
+                if (drop != null && drop.requiredMinutes > 0) {
                     Text(
-                        text = "Отключить контроль батареи для фона",
-                        fontSize = 12.sp,
-                        color = Color(0xFFFFCA28)
+                        text = "Дроп: ${drop.benefitName}",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFBF94FF),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = String.format(
+                                Locale.US,
+                                "%.1f%% (%d/%d мин)",
+                                drop.progressPercent,
+                                drop.watchedClamped,
+                                drop.requiredMinutes
+                            ),
+                            fontSize = 12.sp,
+                            color = Color(0xFF00E676)
+                        )
+                        Text(
+                            text = "осталось ${formatMinutesAsClock(drop.remainingMinutes)}",
+                            fontSize = 12.sp,
+                            color = Color(0xFFADADB8)
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { drop.progressFraction },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(4.dp)),
+                        color = Color(0xFF00C853),
+                        trackColor = Color(0xFF2C2C35)
+                    )
+                } else {
+                    Text(
+                        text = "Ожидание выбора дропа...",
+                        fontSize = 12.sp,
+                        color = Color(0xFF71717A)
+                    )
+                }
+            }
+        }
+
+        // Окно Output (Логи) как внизу Main на ПК
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF141417)),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, Color(0xFF2B2B33)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            Column(modifier = Modifier.fillMaxSize().padding(10.dp)) {
+                Text(
+                    text = "Output / Логи",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFFADADB8),
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+                if (minerState.logs.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("Нажмите «Старт» для запуска майнинга", color = Color(0xFF71717A), fontSize = 13.sp)
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        items(minerState.logs.asReversed()) { line ->
+                            Text(
+                                text = line,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color(0xFFD4D4D8)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -661,7 +801,177 @@ private fun MinerStatusCard(
 }
 
 @Composable
-private fun CampaignsTab(
+private fun ChannelsTab(
+    minerState: MinerUiState,
+    onRefreshChannels: () -> Unit,
+    onSwitchChannel: (String) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = minerState.activeCampaign?.gameName ?: "Каналы",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFBF94FF)
+                )
+                Text(
+                    text = if (minerState.activeChannelLogin != null) {
+                        "Сейчас смотрим: ${minerState.activeChannelLogin}"
+                    } else {
+                        "Нажмите Switch для ручного выбора стримера"
+                    },
+                    fontSize = 12.sp,
+                    color = Color(0xFFADADB8)
+                )
+            }
+            OutlinedButton(
+                onClick = onRefreshChannels,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Обновить", fontSize = 12.sp)
+            }
+        }
+
+        // Заголовок таблицы как на ПК
+        Surface(
+            color = Color(0xFF202026),
+            shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Канал", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFADADB8), modifier = Modifier.weight(1.4f))
+                Text("Статус", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFADADB8), modifier = Modifier.weight(0.9f))
+                Text("Зрит.", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFADADB8), modifier = Modifier.weight(0.7f))
+                Text("Switch", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFADADB8), textAlign = TextAlign.End, modifier = Modifier.width(64.dp))
+            }
+        }
+
+        if (minerState.channels.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = "Список каналов появится после запуска майнера или нажатия «Обновить».",
+                    color = Color(0xFFADADB8),
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(20.dp)
+                )
+            }
+            return@Column
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            items(minerState.channels, key = { it.channelId }) { stream ->
+                val isCurrent = stream.channelLogin.equals(minerState.activeChannelLogin, ignoreCase = true)
+                ChannelRowItem(
+                    stream = stream,
+                    isCurrent = isCurrent,
+                    canSwitch = minerState.isRunning && !isCurrent,
+                    onSwitch = { onSwitchChannel(stream.channelLogin) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChannelRowItem(
+    stream: LiveStreamCandidate,
+    isCurrent: Boolean,
+    canSwitch: Boolean,
+    onSwitch: () -> Unit
+) {
+    Surface(
+        color = if (isCurrent) Color(0xFF281E3B) else Color(0xFF18181B),
+        shape = RoundedCornerShape(6.dp),
+        border = if (isCurrent) BorderStroke(1.dp, Color(0xFF9146FF)) else null,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1.4f)) {
+                Text(
+                    text = stream.displayName,
+                    fontSize = 13.sp,
+                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                    color = if (isCurrent) Color(0xFFBF94FF) else Color(0xFFEFEFF1),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = stream.gameName,
+                    fontSize = 11.sp,
+                    color = Color(0xFFADADB8),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Row(
+                modifier = Modifier.weight(0.9f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (isCurrent) "ACTIVE" else "ONLINE",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF00E676)
+                )
+                Spacer(modifier = Modifier.width(3.dp))
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = Color(0xFF00E676),
+                    modifier = Modifier.size(13.dp)
+                )
+            }
+
+            Text(
+                text = stream.viewers.toString(),
+                fontSize = 12.sp,
+                color = Color(0xFFEFEFF1),
+                modifier = Modifier.weight(0.7f)
+            )
+
+            Box(modifier = Modifier.width(64.dp), contentAlignment = Alignment.CenterEnd) {
+                if (canSwitch) {
+                    IconButton(
+                        onClick = onSwitch,
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SwapHoriz,
+                            contentDescription = "Переключиться",
+                            tint = Color(0xFFBF94FF)
+                        )
+                    }
+                } else if (isCurrent) {
+                    Text("Текущий", fontSize = 10.sp, color = Color(0xFFBF94FF))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InventoryTab(
     campaigns: List<DropCampaignUi>,
     priorityGames: List<String>,
     excludedGames: List<String>,
@@ -673,7 +983,6 @@ private fun CampaignsTab(
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf(CampaignFilter.ALL) }
-    val expandedIds = remember { mutableStateMapOf<String, Boolean>() }
 
     val filtered = remember(campaigns, searchQuery, selectedFilter) {
         campaigns.filter { c ->
@@ -750,19 +1059,16 @@ private fun CampaignsTab(
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(filtered, key = { it.id }) { camp ->
                 val isPriority = priorityGames.any { it.equals(camp.gameName, ignoreCase = true) }
                 val isExcluded = excludedGames.any { it.equals(camp.gameName, ignoreCase = true) }
-                val isExpanded = expandedIds[camp.id] == true
 
-                CampaignCard(
+                PcStyleInventoryCampaignCard(
                     camp = camp,
                     isPriority = isPriority,
                     isExcluded = isExcluded,
-                    isExpanded = isExpanded,
-                    onToggleExpand = { expandedIds[camp.id] = !isExpanded },
                     onTogglePriority = { onTogglePriority(camp.gameName) },
                     onToggleExclude = { onToggleExclude(camp.gameName) },
                     onManualClaim = onManualClaim,
@@ -774,12 +1080,10 @@ private fun CampaignsTab(
 }
 
 @Composable
-private fun CampaignCard(
+private fun PcStyleInventoryCampaignCard(
     camp: DropCampaignUi,
     isPriority: Boolean,
     isExcluded: Boolean,
-    isExpanded: Boolean,
-    onToggleExpand: () -> Unit,
     onTogglePriority: () -> Unit,
     onToggleExclude: () -> Unit,
     onManualClaim: (String, String, String) -> Unit,
@@ -789,167 +1093,240 @@ private fun CampaignCard(
         colors = CardDefaults.cardColors(
             containerColor = if (isExcluded) Color(0xFF1F1619) else Color(0xFF18181B)
         ),
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onToggleExpand() }
+        border = BorderStroke(1.dp, Color(0xFF2D2D36)),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
+            // Заголовок кампании
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Text(
+                    text = "${camp.gameName} — ${camp.name}",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isExcluded) Color(0xFFADADB8) else Color(0xFFBF94FF),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onTogglePriority, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        imageVector = if (isPriority) Icons.Default.Star else Icons.Default.StarBorder,
+                        contentDescription = "Приоритет",
+                        tint = if (isPriority) Color(0xFFFFCA28) else Color(0xFFADADB8),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(onClick = onToggleExclude, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.VisibilityOff,
+                        contentDescription = "Исключить",
+                        tint = if (isExcluded) Color(0xFFFF8A9B) else Color(0xFF71717A),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Информация: обложка слева + Active / Ends / Allowed channels справа
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 if (!camp.gameBoxArtUrl.isNullOrBlank()) {
                     AsyncImage(
                         model = camp.gameBoxArtUrl,
                         contentDescription = camp.gameName,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
-                            .size(width = 46.dp, height = 62.dp)
-                            .clip(RoundedCornerShape(8.dp))
+                            .size(width = 58.dp, height = 78.dp)
+                            .clip(RoundedCornerShape(6.dp))
                             .background(Color(0xFF26262C))
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                 }
 
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = camp.gameName,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isExcluded) Color(0xFFADADB8) else Color(0xFFBF94FF),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = camp.name,
-                        fontSize = 12.sp,
-                        color = Color(0xFFEFEFF1),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = if (camp.isActive) "АКТИВНА" else "СКОРО",
-                            fontSize = 11.sp,
+                            text = if (camp.isActive) "Active" else "Upcoming",
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             color = if (camp.isActive) Color(0xFF00E676) else Color(0xFFADADB8)
                         )
-                        if (camp.totalDropsCount > 0) {
-                            Text(
-                                text = "• ${camp.claimedDropsCount}/${camp.totalDropsCount} дроп.",
-                                fontSize = 11.sp,
-                                color = Color(0xFFADADB8)
+                        if (camp.isActive) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                tint = Color(0xFF00E676),
+                                modifier = Modifier.size(14.dp)
                             )
                         }
-                        if (!camp.isAccountConnected) {
-                            Text("• Не привязан", fontSize = 11.sp, color = Color(0xFFFFCA28))
-                        }
+                    }
+                    Text(
+                        text = "До: ${formatDate(camp.endsAtEpochMs)}",
+                        fontSize = 12.sp,
+                        color = Color(0xFFD4D4D8)
+                    )
+                    Text(
+                        text = if (camp.aclEnabled && camp.allowedChannels.isNotEmpty()) {
+                            "Каналы: ${camp.allowedChannels.size} шт."
+                        } else {
+                            "Каналы: Все"
+                        },
+                        fontSize = 12.sp,
+                        color = Color(0xFFADADB8)
+                    )
+                    if (!camp.isAccountConnected) {
+                        Text(
+                            text = "Аккаунт не привязан",
+                            fontSize = 11.sp,
+                            color = Color(0xFFFFCA28)
+                        )
                     }
                 }
+            }
 
-                IconButton(onClick = onTogglePriority) {
-                    Icon(
-                        imageVector = if (isPriority) Icons.Default.Star else Icons.Default.StarBorder,
-                        contentDescription = "Приоритет",
-                        tint = if (isPriority) Color(0xFFFFCA28) else Color(0xFFADADB8)
-                    )
+            if (!camp.isAccountConnected && !camp.accountLinkUrl.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = { onOpenLink(camp.accountLinkUrl) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(vertical = 6.dp)
+                ) {
+                    Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Привязать игровой аккаунт", fontSize = 12.sp)
                 }
-                IconButton(onClick = onToggleExclude) {
-                    Icon(
-                        imageVector = Icons.Default.VisibilityOff,
-                        contentDescription = "Исключить",
-                        tint = if (isExcluded) Color(0xFFFF8A9B) else Color(0xFF71717A),
-                        modifier = Modifier.size(20.dp)
-                    )
+            }
+
+            // Горизонтальная лента плиток дропов (как на скрине 1 ПК-версии)
+            if (camp.drops.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(camp.drops, key = { it.id }) { drop ->
+                        DropTileCard(
+                            drop = drop,
+                            onManualClaim = {
+                                val inst = drop.dropInstanceId
+                                if (!inst.isNullOrBlank()) {
+                                    onManualClaim(inst, drop.benefitName, camp.gameName)
+                                }
+                            }
+                        )
+                    }
                 }
-                Icon(
-                    imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = null,
-                    tint = Color(0xFFADADB8)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DropTileCard(
+    drop: TimedDropUi,
+    onManualClaim: () -> Unit
+) {
+    Surface(
+        color = Color(0xFF131317),
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (drop.isClaimed) Color(0xFF1B5E20) else Color(0xFF2D2D36)
+        ),
+        modifier = Modifier.width(126.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = drop.benefitName,
+                fontSize = 11.sp,
+                color = Color(0xFFEFEFF1),
+                maxLines = 2,
+                minLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                lineHeight = 13.sp
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            if (!drop.imageUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = drop.imageUrl,
+                    contentDescription = drop.benefitName,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(58.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xFF26262C))
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(58.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xFF26262C))
                 )
             }
 
-            if (isExpanded) {
-                Spacer(modifier = Modifier.height(10.dp))
-                HorizontalDivider(color = Color(0xFF27272E))
-                Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-                if (!camp.isAccountConnected && !camp.accountLinkUrl.isNullOrBlank()) {
-                    OutlinedButton(
-                        onClick = { onOpenLink(camp.accountLinkUrl) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 8.dp),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Привязать игровой аккаунт", fontSize = 12.sp)
-                    }
+            if (drop.isClaimed) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "Получен",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF00E676)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = null,
+                        tint = Color(0xFF00E676),
+                        modifier = Modifier.size(13.dp)
+                    )
                 }
-
-                camp.drops.forEach { drop ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (!drop.imageUrl.isNullOrBlank()) {
-                            AsyncImage(
-                                model = drop.imageUrl,
-                                contentDescription = drop.benefitName,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(Color(0xFF26262C))
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                        }
-
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = drop.benefitName,
-                                fontSize = 13.sp,
-                                color = if (drop.isClaimed) Color(0xFF00E676) else Color(0xFFEFEFF1),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = if (drop.isClaimed) {
-                                    "Получен"
-                                } else {
-                                    "${drop.currentMinutes} / ${drop.requiredMinutes} мин"
-                                },
-                                fontSize = 11.sp,
-                                color = Color(0xFFADADB8)
-                            )
-                        }
-
-                        if (drop.canClaim && !drop.dropInstanceId.isNullOrBlank()) {
-                            Button(
-                                onClick = {
-                                    onManualClaim(drop.dropInstanceId, drop.benefitName, camp.gameName)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9146FF)),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                shape = RoundedCornerShape(6.dp)
-                            ) {
-                                Text("Забрать", fontSize = 11.sp)
-                            }
-                        } else if (drop.isClaimed) {
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = "Получен",
-                                tint = Color(0xFF00E676),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
+            } else if (drop.canClaim) {
+                Button(
+                    onClick = onManualClaim,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9146FF)),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    modifier = Modifier.height(26.dp)
+                ) {
+                    Text("Забрать", fontSize = 11.sp)
                 }
+            } else {
+                LinearProgressIndicator(
+                    progress = { drop.progressFraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = Color(0xFF9146FF),
+                    trackColor = Color(0xFF2C2C35)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = String.format(
+                        Locale.US,
+                        "%.1f%% из %dм",
+                        drop.progressPercent,
+                        drop.requiredMinutes
+                    ),
+                    fontSize = 10.sp,
+                    color = Color(0xFFADADB8),
+                    maxLines = 1
+                )
             }
         }
     }
@@ -1013,7 +1390,7 @@ private fun PrioritiesTab(
         if (priorityGames.isEmpty()) {
             item {
                 Text(
-                    text = "Список пуст. Нажмите ★ в карточке игры или введите название выше.",
+                    text = "Список пуст. Нажмите ★ в карточке игры во вкладке «Дропсы» или введите название выше.",
                     color = Color(0xFFADADB8),
                     fontSize = 13.sp,
                     modifier = Modifier.padding(vertical = 8.dp)
@@ -1086,30 +1463,6 @@ private fun PrioritiesTab(
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun LogsTab(logs: List<String>) {
-    if (logs.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Логи пока пустые", color = Color(0xFFADADB8))
-        }
-        return
-    }
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        items(logs.asReversed()) { line ->
-            Text(
-                text = line,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFFD4D4D8)
-            )
         }
     }
 }
