@@ -12,7 +12,9 @@ data class AllowedChannel(
 data class TimedDropUi(
     val id: String,
     val name: String,
+    val benefitId: String,
     val benefitName: String,
+    val imageUrl: String?,
     val requiredMinutes: Int,
     val currentMinutes: Int,
     val isClaimed: Boolean,
@@ -23,9 +25,6 @@ data class TimedDropUi(
     val canClaim: Boolean
         get() = !isClaimed && requiredMinutes > 0 && currentMinutes >= requiredMinutes && !dropInstanceId.isNullOrBlank()
 
-    val isCompleted: Boolean
-        get() = isClaimed
-
     val progressFraction: Float
         get() = if (requiredMinutes <= 0) 0f else (currentMinutes.toFloat() / requiredMinutes.toFloat()).coerceIn(0f, 1f)
 }
@@ -35,6 +34,8 @@ data class DropCampaignUi(
     val name: String,
     val gameName: String,
     val gameSlug: String,
+    val gameBoxArtUrl: String?,
+    val accountLinkUrl: String?,
     val status: String,
     val isAccountConnected: Boolean,
     val startsAtEpochMs: Long,
@@ -49,8 +50,17 @@ data class DropCampaignUi(
             return status.equals("ACTIVE", ignoreCase = true) && now in startsAtEpochMs..endsAtEpochMs
         }
 
+    val isUpcoming: Boolean
+        get() = status.equals("UPCOMING", ignoreCase = true) || System.currentTimeMillis() < startsAtEpochMs
+
     val hasUnclaimedDrops: Boolean
         get() = drops.any { !it.isClaimed && it.requiredMinutes > 0 }
+
+    val claimedDropsCount: Int
+        get() = drops.count { it.isClaimed }
+
+    val totalDropsCount: Int
+        get() = drops.size
 
     val nextDrop: TimedDropUi?
         get() {
@@ -84,7 +94,15 @@ data class MinerUiState(
     val activeDrop: TimedDropUi? = null,
     val campaigns: List<DropCampaignUi> = emptyList(),
     val priorityGames: List<String> = emptyList(),
+    val excludedGames: List<String> = emptyList(),
     val priorityOnly: Boolean = false,
+    val skipUnconnected: Boolean = false,
+    val claimedSessionCount: Int = 0,
+    val totalClaimedAllTime: Int = 0,
+    val lastClaimedSeq: Long = 0L,
+    val lastClaimedTitle: String = "",
+    val lastClaimedBody: String = "",
+    val lastCampaignsFetchMs: Long = 0L,
     val logs: List<String> = emptyList(),
     val isRefreshing: Boolean = false
 )
@@ -93,14 +111,13 @@ class MinerPreferences(context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences("tdm_settings", Context.MODE_PRIVATE)
 
-    fun getPriorityGames(): List<String> {
-        val raw = prefs.getString(KEY_PRIORITY_GAMES, "") ?: ""
-        return raw.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
-    }
+    fun getPriorityGames(): List<String> = readList(KEY_PRIORITY_GAMES)
 
-    fun savePriorityGames(games: List<String>) {
-        prefs.edit().putString(KEY_PRIORITY_GAMES, games.joinToString("\n")).apply()
-    }
+    fun savePriorityGames(games: List<String>) = saveList(KEY_PRIORITY_GAMES, games)
+
+    fun getExcludedGames(): List<String> = readList(KEY_EXCLUDED_GAMES)
+
+    fun saveExcludedGames(games: List<String>) = saveList(KEY_EXCLUDED_GAMES, games)
 
     fun isPriorityOnly(): Boolean = prefs.getBoolean(KEY_PRIORITY_ONLY, false)
 
@@ -108,8 +125,34 @@ class MinerPreferences(context: Context) {
         prefs.edit().putBoolean(KEY_PRIORITY_ONLY, enabled).apply()
     }
 
+    fun isSkipUnconnected(): Boolean = prefs.getBoolean(KEY_SKIP_UNCONNECTED, false)
+
+    fun setSkipUnconnected(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SKIP_UNCONNECTED, enabled).apply()
+    }
+
+    fun getTotalClaimed(): Int = prefs.getInt(KEY_TOTAL_CLAIMED, 0)
+
+    fun incrementTotalClaimed(): Int {
+        val next = getTotalClaimed() + 1
+        prefs.edit().putInt(KEY_TOTAL_CLAIMED, next).apply()
+        return next
+    }
+
+    private fun readList(key: String): List<String> {
+        val raw = prefs.getString(key, "") ?: ""
+        return raw.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    private fun saveList(key: String, list: List<String>) {
+        prefs.edit().putString(key, list.joinToString("\n")).apply()
+    }
+
     companion object {
         private const val KEY_PRIORITY_GAMES = "priority_games"
+        private const val KEY_EXCLUDED_GAMES = "excluded_games"
         private const val KEY_PRIORITY_ONLY = "priority_only"
+        private const val KEY_SKIP_UNCONNECTED = "skip_unconnected"
+        private const val KEY_TOTAL_CLAIMED = "total_claimed_all_time"
     }
 }
