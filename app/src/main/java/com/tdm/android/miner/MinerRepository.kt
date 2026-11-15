@@ -6,6 +6,7 @@ import com.tdm.android.data.DropCampaignUi
 import com.tdm.android.data.LiveStreamCandidate
 import com.tdm.android.data.MinerPreferences
 import com.tdm.android.data.MinerUiState
+import com.tdm.android.data.PriorityMode
 import com.tdm.android.data.TwitchSession
 import com.tdm.android.network.GqlRegistry
 import com.tdm.android.network.TwitchAuthApi
@@ -53,6 +54,7 @@ object MinerRepository {
             it.copy(
                 priorityGames = p.getPriorityGames(),
                 excludedGames = p.getExcludedGames(),
+                priorityMode = p.getPriorityMode(),
                 priorityOnly = p.isPriorityOnly(),
                 skipUnconnected = p.isSkipUnconnected(),
                 totalClaimedAllTime = p.getTotalClaimed()
@@ -94,12 +96,32 @@ object MinerRepository {
         val trimmed = gameName.trim()
         if (trimmed.isEmpty()) return
         val p = prefs ?: return
+        val excluded = _state.value.excludedGames.toMutableList()
+        if (excluded.removeAll { it.equals(trimmed, ignoreCase = true) }) {
+            p.saveExcludedGames(excluded)
+        }
         val current = _state.value.priorityGames.toMutableList()
         if (current.none { it.equals(trimmed, ignoreCase = true) }) {
             current.add(trimmed)
             p.savePriorityGames(current)
-            _state.update { it.copy(priorityGames = current) }
         }
+        _state.update { it.copy(priorityGames = current, excludedGames = excluded) }
+    }
+
+    fun addExcludedGame(gameName: String) {
+        val trimmed = gameName.trim()
+        if (trimmed.isEmpty()) return
+        val p = prefs ?: return
+        val priority = _state.value.priorityGames.toMutableList()
+        if (priority.removeAll { it.equals(trimmed, ignoreCase = true) }) {
+            p.savePriorityGames(priority)
+        }
+        val current = _state.value.excludedGames.toMutableList()
+        if (current.none { it.equals(trimmed, ignoreCase = true) }) {
+            current.add(trimmed)
+            p.saveExcludedGames(current)
+        }
+        _state.update { it.copy(priorityGames = priority, excludedGames = current) }
     }
 
     fun togglePriorityGame(gameName: String) {
@@ -107,11 +129,11 @@ object MinerRepository {
         val current = _state.value.priorityGames.toMutableList()
         if (current.any { it.equals(gameName, ignoreCase = true) }) {
             current.removeAll { it.equals(gameName, ignoreCase = true) }
+            p.savePriorityGames(current)
+            _state.update { it.copy(priorityGames = current) }
         } else {
-            current.add(gameName)
+            addPriorityGame(gameName)
         }
-        p.savePriorityGames(current)
-        _state.update { it.copy(priorityGames = current) }
     }
 
     fun movePriorityGame(index: Int, delta: Int) {
@@ -130,11 +152,18 @@ object MinerRepository {
         val current = _state.value.excludedGames.toMutableList()
         if (current.any { it.equals(gameName, ignoreCase = true) }) {
             current.removeAll { it.equals(gameName, ignoreCase = true) }
+            p.saveExcludedGames(current)
+            _state.update { it.copy(excludedGames = current) }
         } else {
-            current.add(gameName)
+            addExcludedGame(gameName)
         }
-        p.saveExcludedGames(current)
-        _state.update { it.copy(excludedGames = current) }
+    }
+
+    fun setPriorityMode(mode: PriorityMode) {
+        val p = prefs ?: return
+        p.setPriorityMode(mode)
+        _state.update { it.copy(priorityMode = mode) }
+        addLog("Режим выбора: ${mode.title}")
     }
 
     fun setPriorityOnly(enabled: Boolean) {
@@ -454,6 +483,8 @@ object MinerRepository {
     private fun orderEligibleCampaigns(campaigns: List<DropCampaignUi>): List<DropCampaignUi> {
         val excluded = _state.value.excludedGames
         val skipUnconnected = _state.value.skipUnconnected
+        val priorities = _state.value.priorityGames
+        val mode = _state.value.priorityMode
 
         val eligible = campaigns.filter { c ->
             c.isActive &&
@@ -464,24 +495,63 @@ object MinerRepository {
         }
         if (eligible.isEmpty()) return emptyList()
 
-        val ordered = mutableListOf<DropCampaignUi>()
-        val priorities = _state.value.priorityGames
-        for (game in priorities) {
-            ordered.addAll(
-                eligible.filter {
-                    it !in ordered && it.gameName.equals(game, ignoreCase = true)
-                }.sortedByDescending { it.isAccountConnected }
-            )
+        val inPriority = eligible.filter { c ->
+            priorities.any { p -> p.equals(c.gameName, ignoreCase = true) }
+        }
+        val others = if (_state.value.priorityOnly) {
+            emptyList()
+        } else {
+            eligible.filter { c -> c !in inPriority }
         }
 
-        if (!_state.value.priorityOnly) {
-            ordered.addAll(
-                eligible.filter { it !in ordered }
-                    .sortedByDescending { it.isAccountConnected }
-            )
+        val sortedPriority = when (mode) {
+            PriorityMode.LIST_ORDER -> {
+                inPriority.sortedWith(
+                    compareBy<DropCampaignUi> { c ->
+                        priorities.indexOfFirst { p -> p.equals(c.gameName, ignoreCase = true) }
+                    }
+                        .thenByDescending { it.isAccountConnected }
+                        .thenBy { it.endsAtEpochMs }
+                )
+            }
+            PriorityMode.ENDING_SOONEST -> {
+                inPriority.sortedWith(
+                    compareBy<DropCampaignUi> { it.endsAtEpochMs }
+                        .thenByDescending { it.isAccountConnected }
+                )
+            }
+            PriorityMode.LOWEST_AVAILABILITY -> {
+                inPriority.sortedWith(
+                    compareBy<DropCampaignUi> { it.rarityScore }
+                        .thenBy { it.endsAtEpochMs }
+                        .thenByDescending { it.isAccountConnected }
+                )
+            }
         }
 
-        return ordered
+        val sortedOthers = when (mode) {
+            PriorityMode.LIST_ORDER -> {
+                others.sortedWith(
+                    compareByDescending<DropCampaignUi> { it.isAccountConnected }
+                        .thenBy { it.endsAtEpochMs }
+                )
+            }
+            PriorityMode.ENDING_SOONEST -> {
+                others.sortedWith(
+                    compareBy<DropCampaignUi> { it.endsAtEpochMs }
+                        .thenByDescending { it.isAccountConnected }
+                )
+            }
+            PriorityMode.LOWEST_AVAILABILITY -> {
+                others.sortedWith(
+                    compareBy<DropCampaignUi> { it.rarityScore }
+                        .thenBy { it.endsAtEpochMs }
+                        .thenByDescending { it.isAccountConnected }
+                )
+            }
+        }
+
+        return sortedPriority + sortedOthers
     }
 
     private suspend fun mineStreamSession(
