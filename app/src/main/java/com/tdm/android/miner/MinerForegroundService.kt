@@ -15,7 +15,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.tdm.android.MainActivity
 import com.tdm.android.R
-import com.tdm.android.data.AuthStorage
 import com.tdm.android.data.MinerUiState
 import com.tdm.android.data.TwitchSession
 import com.tdm.android.network.TwitchAuthApi
@@ -31,12 +30,14 @@ class MinerForegroundService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateObserveJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var lastNotifiedClaimSeq: Long = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        createNotificationChannels()
+        lastNotifiedClaimSeq = MinerRepository.state.value.lastClaimedSeq
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -48,7 +49,7 @@ class MinerForegroundService : Service() {
             return START_NOT_STICKY
         }
 
-        val initialNotif = buildNotification(MinerRepository.state.value)
+        val initialNotif = buildStatusNotification(MinerRepository.state.value)
         val fgType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         } else {
@@ -71,9 +72,14 @@ class MinerForegroundService : Service() {
             stateObserveJob = serviceScope.launch {
                 val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 MinerRepository.state.collect { uiState ->
-                    nm.notify(NOTIFICATION_ID, buildNotification(uiState))
-                    if (!uiState.isRunning && MinerRepository.state.value.statusText == "Остановлен") {
-                        // Do not auto-stop during initial transition
+                    nm.notify(NOTIFICATION_ID, buildStatusNotification(uiState))
+                    if (uiState.lastClaimedSeq > lastNotifiedClaimSeq) {
+                        lastNotifiedClaimSeq = uiState.lastClaimedSeq
+                        val claimNotifId = CLAIM_NOTIF_BASE_ID + (uiState.lastClaimedSeq % 50).toInt()
+                        nm.notify(
+                            claimNotifId,
+                            buildClaimedNotification(uiState.lastClaimedTitle, uiState.lastClaimedBody)
+                        )
                     }
                 }
             }
@@ -115,19 +121,30 @@ class MinerForegroundService : Service() {
         wakeLock = null
     }
 
-    private fun createNotificationChannel() {
-        val channel = NotificationChannel(
+    private fun createNotificationChannels() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        val statusChannel = NotificationChannel(
             CHANNEL_ID,
             "Фоновый майнинг дропов",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Показывает статус и прогресс текущего Twitch Drop"
         }
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(channel)
+
+        val claimChannel = NotificationChannel(
+            CLAIM_CHANNEL_ID,
+            "Полученные награды",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Уведомления о каждом автоматически собранном дропе"
+        }
+
+        nm.createNotificationChannel(statusChannel)
+        nm.createNotificationChannel(claimChannel)
     }
 
-    private fun buildNotification(state: MinerUiState): Notification {
+    private fun buildStatusNotification(state: MinerUiState): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java)
         val openPending = PendingIntent.getActivity(
             this,
@@ -170,10 +187,30 @@ class MinerForegroundService : Service() {
             .build()
     }
 
+    private fun buildClaimedNotification(title: String, body: String): Notification {
+        val openAppIntent = Intent(this, MainActivity::class.java)
+        val openPending = PendingIntent.getActivity(
+            this,
+            2,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, CLAIM_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle(title.ifBlank { "Дроп получен!" })
+            .setContentText(body)
+            .setAutoCancel(true)
+            .setContentIntent(openPending)
+            .build()
+    }
+
     companion object {
         const val ACTION_START = "com.tdm.android.action.START"
         const val ACTION_STOP = "com.tdm.android.action.STOP"
         private const val CHANNEL_ID = "tdm_miner_channel"
+        private const val CLAIM_CHANNEL_ID = "tdm_claimed_channel"
         private const val NOTIFICATION_ID = 1001
+        private const val CLAIM_NOTIF_BASE_ID = 2000
     }
 }
