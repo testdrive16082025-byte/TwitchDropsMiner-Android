@@ -3,6 +3,12 @@ package com.tdm.android.data
 import android.content.Context
 import android.content.SharedPreferences
 
+enum class PriorityMode(val title: String, val subtitle: String) {
+    LIST_ORDER("По списку", "Строго по порядку вашего списка приоритетов"),
+    ENDING_SOONEST("Быстрее сгорают", "Сначала кампании с ближайшим окончанием"),
+    LOWEST_AVAILABILITY("Редкие каналы", "Сначала кампании, доступные у 1–нескольких стримеров")
+}
+
 data class AllowedChannel(
     val id: String,
     val login: String,
@@ -71,6 +77,9 @@ data class DropCampaignUi(
     val totalDropsCount: Int
         get() = drops.size
 
+    val rarityScore: Int
+        get() = if (aclEnabled && allowedChannels.isNotEmpty()) allowedChannels.size else Int.MAX_VALUE
+
     val campaignProgressFraction: Float
         get() {
             val totalReq = drops.sumOf { it.requiredMinutes.coerceAtLeast(0) }
@@ -108,7 +117,7 @@ data class LiveStreamCandidate(
 
 data class MinerUiState(
     val isRunning: Boolean = false,
-    val statusText: String = "Остановлен",
+    val statusText: String = "Подготовка...",
     val activeChannelLogin: String? = null,
     val activeChannelViewers: Int = 0,
     val activeGameName: String? = null,
@@ -118,6 +127,7 @@ data class MinerUiState(
     val campaigns: List<DropCampaignUi> = emptyList(),
     val priorityGames: List<String> = emptyList(),
     val excludedGames: List<String> = emptyList(),
+    val priorityMode: PriorityMode = PriorityMode.LIST_ORDER,
     val priorityOnly: Boolean = false,
     val skipUnconnected: Boolean = false,
     val claimedSessionCount: Int = 0,
@@ -141,6 +151,16 @@ class MinerPreferences(context: Context) {
     fun getExcludedGames(): List<String> = readList(KEY_EXCLUDED_GAMES)
 
     fun saveExcludedGames(games: List<String>) = saveList(KEY_EXCLUDED_GAMES, games)
+
+    fun getPriorityMode(): PriorityMode {
+        val raw = prefs.getString(KEY_PRIORITY_MODE, PriorityMode.LIST_ORDER.name)
+        return runCatching { PriorityMode.valueOf(raw ?: PriorityMode.LIST_ORDER.name) }
+            .getOrDefault(PriorityMode.LIST_ORDER)
+    }
+
+    fun setPriorityMode(mode: PriorityMode) {
+        prefs.edit().putString(KEY_PRIORITY_MODE, mode.name).apply()
+    }
 
     fun isPriorityOnly(): Boolean = prefs.getBoolean(KEY_PRIORITY_ONLY, false)
 
@@ -174,6 +194,7 @@ class MinerPreferences(context: Context) {
     companion object {
         private const val KEY_PRIORITY_GAMES = "priority_games"
         private const val KEY_EXCLUDED_GAMES = "excluded_games"
+        private const val KEY_PRIORITY_MODE = "priority_mode"
         private const val KEY_PRIORITY_ONLY = "priority_only"
         private const val KEY_SKIP_UNCONNECTED = "skip_unconnected"
         private const val KEY_TOTAL_CLAIMED = "total_claimed_all_time"
