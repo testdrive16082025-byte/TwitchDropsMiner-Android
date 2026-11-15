@@ -11,6 +11,7 @@ import com.tdm.android.network.GqlRegistry
 import com.tdm.android.network.TwitchAuthApi
 import com.tdm.android.network.TwitchGqlClient
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -35,6 +37,12 @@ object MinerRepository {
     private var prefs: MinerPreferences? = null
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private val channelCooldowns = mutableMapOf<String, Long>()
+
+    @Volatile
+    private var switchSignal: CompletableDeferred<Unit>? = null
+
+    @Volatile
+    private var preferredChannelLogin: String? = null
 
     fun initPreferences(context: Context) {
         if (prefs == null) {
@@ -57,6 +65,28 @@ object MinerRepository {
         _state.update { cur ->
             val updated = (cur.logs + line).takeLast(150)
             cur.copy(logs = updated)
+        }
+    }
+
+    fun switchToChannel(channelLogin: String) {
+        if (!_state.value.isRunning) return
+        preferredChannelLogin = channelLogin
+        addLog("Переключаюсь на канал $channelLogin...")
+        switchSignal?.complete(Unit)
+    }
+
+    fun refreshActiveChannels(context: Context, session: TwitchSession) {
+        val camp = _state.value.activeCampaign ?: orderEligibleCampaigns(_state.value.campaigns).firstOrNull() ?: return
+        scope.launch {
+            try {
+                val deviceId = AuthStorage(context).getOrCreateDeviceId()
+                val gql = TwitchGqlClient(session, deviceId, ::addLog)
+                val streams = gql.fetchLiveStreamsForCampaign(camp)
+                _state.update { it.copy(channels = streams) }
+                addLog("Список каналов обновлён (${camp.gameName}): ${streams.size} онлайн.")
+            } catch (e: Exception) {
+                addLog("Ошибка обновления каналов: ${e.message}")
+            }
         }
     }
 
@@ -191,6 +221,19 @@ object MinerRepository {
 
                 var firstLoop = true
                 while (isActive) {
+                    val requestedLogin = preferredChannelLogin
+                    if (!requestedLogin.isNullOrBlank()) {
+                        preferredChannelLogin = null
+                        val curCamp = _state.value.activeCampaign
+                        val cachedStream = _state.value.channels.firstOrNull {
+                            it.channelLogin.equals(requestedLogin, ignoreCase = true)
+                        }
+                        if (curCamp != null && cachedStream != null && curCamp.isActive && curCamp.hasUnclaimedDrops) {
+                            mineStreamSession(gql, curCamp, cachedStream)
+                            continue
+                        }
+                    }
+
                     val cacheAgeMs = System.currentTimeMillis() - _state.value.lastCampaignsFetchMs
                     val campaigns = if (firstLoop && _state.value.campaigns.isNotEmpty() && cacheAgeMs < 120_000L) {
                         addLog("Использую свежий список кампаний.")
@@ -231,8 +274,9 @@ object MinerRepository {
                                 statusText = "Нет подходящих активных кампаний",
                                 activeChannelLogin = null,
                                 activeGameName = null,
-                                activeCampaignName = null,
-                                activeDrop = null
+                                activeCampaign = null,
+                                activeDrop = null,
+                                channels = emptyList()
                             )
                         }
                         addLog("Нет доступных активных кампаний. Следующая проверка через 5 мин.")
@@ -242,6 +286,7 @@ object MinerRepository {
 
                     var selectedCampaign: DropCampaignUi? = null
                     var selectedStream: LiveStreamCandidate? = null
+                    var foundStreams: List<LiveStreamCandidate> = emptyList()
                     val now = System.currentTimeMillis()
 
                     for (camp in orderedCampaigns) {
@@ -254,6 +299,10 @@ object MinerRepository {
                             emptyList()
                         }
 
+                        if (streams.isNotEmpty() && foundStreams.isEmpty()) {
+                            foundStreams = streams
+                        }
+
                         for (s in streams.take(12)) {
                             val cooldownUntil = channelCooldowns[s.channelId] ?: 0L
                             if (cooldownUntil > now) continue
@@ -262,12 +311,15 @@ object MinerRepository {
                             if (supported != false) {
                                 selectedCampaign = camp
                                 selectedStream = s
+                                foundStreams = streams
                                 break
                             }
                             addLog("Пропуск ${s.channelLogin}: дропы кампании не активны.")
                         }
                         if (selectedStream != null) break
                     }
+
+                    _state.update { it.copy(channels = foundStreams) }
 
                     if (selectedCampaign == null || selectedStream == null) {
                         val firstCamp = orderedCampaigns.first()
@@ -276,7 +328,7 @@ object MinerRepository {
                                 statusText = "Нет стримов с дропами",
                                 activeChannelLogin = null,
                                 activeGameName = firstCamp.gameName,
-                                activeCampaignName = firstCamp.name,
+                                activeCampaign = firstCamp,
                                 activeDrop = firstCamp.nextDrop
                             )
                         }
@@ -292,6 +344,7 @@ object MinerRepository {
             } catch (e: Exception) {
                 addLog("Критическая ошибка майнера: ${e.message}")
             } finally {
+                switchSignal = null
                 _state.update {
                     it.copy(
                         isRunning = false,
@@ -305,6 +358,9 @@ object MinerRepository {
     }
 
     fun stopMining() {
+        switchSignal?.complete(Unit)
+        switchSignal = null
+        preferredChannelLogin = null
         minerJob?.cancel()
         minerJob = null
         _state.update {
@@ -313,6 +369,50 @@ object MinerRepository {
                 statusText = "Остановлен",
                 activeChannelLogin = null,
                 activeChannelViewers = 0
+            )
+        }
+    }
+
+    private fun syncDropProgressIntoState(
+        campaignId: String,
+        dropId: String,
+        newMinutes: Int,
+        newRequired: Int,
+        isClaimed: Boolean,
+        dropInstanceId: String?
+    ) {
+        _state.update { state ->
+            var updatedActiveCamp = state.activeCampaign
+            var updatedActiveDrop = state.activeDrop
+
+            val updatedCampaigns = state.campaigns.map { camp ->
+                if (camp.id != campaignId) camp
+                else {
+                    val newDrops = camp.drops.map { d ->
+                        if (d.id != dropId) d
+                        else d.copy(
+                            currentMinutes = maxOf(d.currentMinutes, newMinutes),
+                            requiredMinutes = if (newRequired > 0) newRequired else d.requiredMinutes,
+                            isClaimed = d.isClaimed || isClaimed,
+                            dropInstanceId = dropInstanceId ?: d.dropInstanceId
+                        ).also { updated ->
+                            if (updatedActiveDrop?.id == updated.id) {
+                                updatedActiveDrop = updated
+                            }
+                        }
+                    }
+                    val updatedCamp = camp.copy(drops = newDrops)
+                    if (updatedActiveCamp?.id == updatedCamp.id) {
+                        updatedActiveCamp = updatedCamp
+                    }
+                    updatedCamp
+                }
+            }
+
+            state.copy(
+                campaigns = updatedCampaigns,
+                activeCampaign = updatedActiveCamp,
+                activeDrop = updatedActiveDrop
             )
         }
     }
@@ -404,7 +504,7 @@ object MinerRepository {
                 activeChannelLogin = stream.channelLogin,
                 activeChannelViewers = stream.viewers,
                 activeGameName = campaign.gameName,
-                activeCampaignName = campaign.name,
+                activeCampaign = campaign,
                 activeDrop = currentDrop
             )
         }
@@ -417,6 +517,8 @@ object MinerRepository {
         val sessionStartMs = System.currentTimeMillis()
 
         while (System.currentTimeMillis() - sessionStartMs < 20 * 60_000L) {
+            if (!preferredChannelLogin.isNullOrBlank()) return
+
             val chunksSent = gql.sendWatchHeartbeat(playlistUrl, seenChunks)
             if (chunksSent <= 0) {
                 addLog("Поток ${stream.channelLogin} прервался, переподключение...")
@@ -446,12 +548,15 @@ object MinerRepository {
                             lastProgressChangeMs = System.currentTimeMillis()
                             addLog("Прогресс «${activeDropSnap.benefitName}»: $updatedMinutes/${activeDropSnap.requiredMinutes} мин")
                         }
+                        val nextReq = if (progress.requiredMinutes > 0) progress.requiredMinutes else activeDropSnap.requiredMinutes
                         val nextDropState = activeDropSnap.copy(
                             currentMinutes = updatedMinutes,
-                            requiredMinutes = if (progress.requiredMinutes > 0) progress.requiredMinutes else activeDropSnap.requiredMinutes
+                            requiredMinutes = nextReq
                         )
                         currentDrop = nextDropState
                         _state.update { it.copy(activeDrop = nextDropState) }
+                        syncDropProgressIntoState(campaign.id, activeDropSnap.id, updatedMinutes, nextReq, false, null)
+
                         if (nextDropState.requiredMinutes > 0 && nextDropState.currentMinutes >= nextDropState.requiredMinutes) {
                             addLog("Дроп готов к получению! Забираю...")
                             return
@@ -463,6 +568,7 @@ object MinerRepository {
                         val switched = matchedInCampaign.copy(currentMinutes = updatedMinutes)
                         currentDrop = switched
                         _state.update { it.copy(activeDrop = switched) }
+                        syncDropProgressIntoState(campaign.id, switched.id, updatedMinutes, switched.requiredMinutes, false, null)
                         addLog("Отслеживается дроп «${switched.benefitName}»: ${switched.currentMinutes}/${switched.requiredMinutes} мин")
                     }
                 }
@@ -485,6 +591,14 @@ object MinerRepository {
                     )
                     currentDrop = nextDropState
                     _state.update { it.copy(activeDrop = nextDropState) }
+                    syncDropProgressIntoState(
+                        campaign.id,
+                        dropForInv.id,
+                        updatedMinutes,
+                        dropForInv.requiredMinutes,
+                        invSnap.isClaimed,
+                        invSnap.dropInstanceId
+                    )
                     if (invSnap.isClaimed || (nextDropState.requiredMinutes > 0 && nextDropState.currentMinutes >= nextDropState.requiredMinutes)) {
                         addLog("Дроп выполнен! Обновляю и забираю...")
                         return
@@ -498,7 +612,10 @@ object MinerRepository {
                 return
             }
 
-            delay(20_000)
+            val signal = CompletableDeferred<Unit>()
+            switchSignal = signal
+            withTimeoutOrNull(20_000) { signal.await() }
+            if (switchSignal === signal) switchSignal = null
         }
     }
 }
