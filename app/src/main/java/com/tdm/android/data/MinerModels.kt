@@ -25,8 +25,17 @@ data class TimedDropUi(
     val canClaim: Boolean
         get() = !isClaimed && requiredMinutes > 0 && currentMinutes >= requiredMinutes && !dropInstanceId.isNullOrBlank()
 
+    val watchedClamped: Int
+        get() = if (requiredMinutes <= 0) 0 else currentMinutes.coerceIn(0, requiredMinutes)
+
+    val remainingMinutes: Int
+        get() = if (requiredMinutes <= 0) 0 else (requiredMinutes - watchedClamped).coerceAtLeast(0)
+
     val progressFraction: Float
-        get() = if (requiredMinutes <= 0) 0f else (currentMinutes.toFloat() / requiredMinutes.toFloat()).coerceIn(0f, 1f)
+        get() = if (requiredMinutes <= 0) 0f else (watchedClamped.toFloat() / requiredMinutes.toFloat()).coerceIn(0f, 1f)
+
+    val progressPercent: Float
+        get() = progressFraction * 100f
 }
 
 data class DropCampaignUi(
@@ -62,6 +71,19 @@ data class DropCampaignUi(
     val totalDropsCount: Int
         get() = drops.size
 
+    val campaignProgressFraction: Float
+        get() {
+            val totalReq = drops.sumOf { it.requiredMinutes.coerceAtLeast(0) }
+            if (totalReq <= 0) return 0f
+            val totalWatched = drops.sumOf {
+                if (it.isClaimed) it.requiredMinutes.coerceAtLeast(0) else it.watchedClamped
+            }
+            return (totalWatched.toFloat() / totalReq.toFloat()).coerceIn(0f, 1f)
+        }
+
+    val campaignRemainingMinutes: Int
+        get() = drops.sumOf { if (it.isClaimed) 0 else it.remainingMinutes }
+
     val nextDrop: TimedDropUi?
         get() {
             val now = System.currentTimeMillis()
@@ -90,8 +112,9 @@ data class MinerUiState(
     val activeChannelLogin: String? = null,
     val activeChannelViewers: Int = 0,
     val activeGameName: String? = null,
-    val activeCampaignName: String? = null,
+    val activeCampaign: DropCampaignUi? = null,
     val activeDrop: TimedDropUi? = null,
+    val channels: List<LiveStreamCandidate> = emptyList(),
     val campaigns: List<DropCampaignUi> = emptyList(),
     val priorityGames: List<String> = emptyList(),
     val excludedGames: List<String> = emptyList(),
