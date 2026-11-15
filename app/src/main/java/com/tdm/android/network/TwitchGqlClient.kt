@@ -37,6 +37,11 @@ data class DropProgressSnapshot(
     val dropInstanceId: String?
 )
 
+private data class ClaimedBenefitEntry(
+    val benefitId: String,
+    val lastAwardedAtMs: Long
+)
+
 class TwitchGqlClient(
     private val session: TwitchSession,
     private val deviceId: String,
@@ -165,6 +170,17 @@ class TwitchGqlClient(
             }
         }
 
+        val claimedBenefits = mutableListOf<ClaimedBenefitEntry>()
+        inventoryObj?.get("gameEventDrops").asArr()?.forEach { bEl ->
+            val bObj = bEl.asObj() ?: return@forEach
+            val bId = bObj["id"].asStr() ?: return@forEach
+            val count = bObj["totalCount"].asInt() ?: 0
+            val awardedMs = parseIsoTime(bObj["lastAwardedAt"].asStr())
+            if (count > 0 && awardedMs > 0L) {
+                claimedBenefits.add(ClaimedBenefitEntry(bId, awardedMs))
+            }
+        }
+
         val campResp = gqlSingle("Campaigns")
         val rawCampaigns = campResp["data"].asObj()
             ?.get("currentUser").asObj()
@@ -221,26 +237,45 @@ class TwitchGqlClient(
                 val dropName = dObj["name"].asStr() ?: "Drop"
                 val reqMin = dObj["requiredMinutesWatched"].asInt() ?: 0
                 val prog = campProgress[dropId]
-                val benefitName = dObj["benefitEdges"].asArr()?.firstOrNull()
-                    ?.asObj()?.get("benefit").asObj()?.get("name").asStr()
-                    ?: dropName
+
+                val firstBenefit = dObj["benefitEdges"].asArr()?.firstOrNull()
+                    ?.asObj()?.get("benefit").asObj()
+                val benefitId = firstBenefit?.get("id").asStr().orEmpty()
+                val benefitName = firstBenefit?.get("name").asStr() ?: dropName
+                val benefitImage = firstBenefit?.get("imageAssetURL").asStr()
+
+                val dropStartMs = parseIsoTime(dObj["startAt"].asStr())
+                val dropEndMs = parseIsoTime(dObj["endAt"].asStr())
+                val matchedInInventory = benefitId.isNotBlank() &&
+                    dropStartMs > 0L &&
+                    dropEndMs > 0L &&
+                    claimedBenefits.any { it.benefitId == benefitId && it.lastAwardedAtMs in dropStartMs..dropEndMs }
 
                 val curMin = prog?.currentMinutes ?: 0
-                val claimed = prog?.isClaimed ?: false
+                val claimed = (prog?.isClaimed ?: false) || matchedInInventory
                 val instanceId = prog?.dropInstanceId ?: "${session.userId}#$id#$dropId"
 
                 TimedDropUi(
                     id = dropId,
                     name = dropName,
+                    benefitId = benefitId,
                     benefitName = benefitName,
+                    imageUrl = benefitImage,
                     requiredMinutes = reqMin,
-                    currentMinutes = curMin,
+                    currentMinutes = if (claimed && reqMin > 0) maxOf(curMin, reqMin) else curMin,
                     isClaimed = claimed,
                     dropInstanceId = instanceId,
-                    startsAtEpochMs = parseIsoTime(dObj["startAt"].asStr()),
-                    endsAtEpochMs = parseIsoTime(dObj["endAt"].asStr())
+                    startsAtEpochMs = dropStartMs,
+                    endsAtEpochMs = dropEndMs
                 )
             }
+
+            val rawBoxArt = gameObj?.get("boxArtURL").asStr()
+                ?.replace("{width}", "120")
+                ?.replace("{height}", "160")
+
+            val accountLink = detail?.get("accountLinkURL").asStr()
+                ?: base["accountLinkURL"].asStr()
 
             result.add(
                 DropCampaignUi(
@@ -250,6 +285,8 @@ class TwitchGqlClient(
                         ?: gameObj?.get("name").asStr()
                         ?: "Unknown Game",
                     gameSlug = gameObj?.get("slug").asStr() ?: "",
+                    gameBoxArtUrl = rawBoxArt,
+                    accountLinkUrl = accountLink,
                     status = base["status"].asStr() ?: "ACTIVE",
                     isAccountConnected = selfObj?.get("isAccountConnected").asBool() ?: true,
                     startsAtEpochMs = parseIsoTime(base["startAt"].asStr()),
@@ -263,6 +300,7 @@ class TwitchGqlClient(
 
         return result.sortedWith(
             compareByDescending<DropCampaignUi> { it.isActive }
+                .thenByDescending { it.hasUnclaimedDrops }
                 .thenByDescending { it.isAccountConnected }
                 .thenBy { it.endsAtEpochMs }
         )
@@ -480,11 +518,10 @@ class TwitchGqlClient(
         return executeRawGql(rawPayload).asObj() ?: buildJsonObject {}
     }
 
-    suspend fun sendWatchHeartbeat(playlistUrl: String): Int = withContext(Dispatchers.IO) {
+    suspend fun sendWatchHeartbeat(playlistUrl: String, seenChunks: MutableSet<String>): Int = withContext(Dispatchers.IO) {
         try {
             val listReq = Request.Builder()
                 .url(playlistUrl)
-                .header("Connection", "close")
                 .header("User-Agent", GqlRegistry.androidUserAgent)
                 .get()
                 .build()
@@ -504,10 +541,16 @@ class TwitchGqlClient(
 
             if (chunks.isEmpty()) return@withContext -1
 
-            for (chunkUrl in chunks) {
+            val toSend = if (seenChunks.isEmpty()) {
+                chunks.takeLast(3)
+            } else {
+                val fresh = chunks.filter { it !in seenChunks }
+                if (fresh.isNotEmpty()) fresh else listOf(chunks.last())
+            }
+
+            for (chunkUrl in toSend) {
                 val headReq = Request.Builder()
                     .url(chunkUrl)
-                    .header("Connection", "close")
                     .header("User-Agent", GqlRegistry.androidUserAgent)
                     .head()
                     .build()
@@ -518,7 +561,10 @@ class TwitchGqlClient(
                     }
                 }
             }
-            chunks.size
+
+            if (seenChunks.size > 200) seenChunks.clear()
+            seenChunks.addAll(chunks)
+            toSend.size
         } catch (_: Exception) {
             -1
         }
