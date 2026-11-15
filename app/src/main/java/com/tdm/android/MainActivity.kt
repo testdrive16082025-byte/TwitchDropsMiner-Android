@@ -15,6 +15,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -25,7 +26,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.BatteryAlert
@@ -36,14 +36,12 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
@@ -66,6 +64,7 @@ import com.tdm.android.data.AuthStorage
 import com.tdm.android.data.DropCampaignUi
 import com.tdm.android.data.LiveStreamCandidate
 import com.tdm.android.data.MinerUiState
+import com.tdm.android.data.PriorityMode
 import com.tdm.android.data.TimedDropUi
 import com.tdm.android.data.TwitchSession
 import com.tdm.android.miner.MinerForegroundService
@@ -114,9 +113,7 @@ private sealed interface AuthUiState {
 private enum class CampaignFilter(val label: String) {
     ALL("Все"),
     ACTIVE("Активные"),
-    UNCLAIMED("Неполученные"),
-    CONNECTED("Привязанные"),
-    UPCOMING("Скоро")
+    COMPLETED("Выполнены")
 }
 
 private fun formatMinutesAsClock(totalMinutes: Int): String {
@@ -381,13 +378,8 @@ private fun MinerDashboard(
         pm != null && !pm.isIgnoringBatteryOptimizations(context.packageName)
     }
 
+    // Автоматический запуск майнера при входе в приложение
     LaunchedEffect(session.userId) {
-        if (minerState.campaigns.isEmpty() && !minerState.isRunning) {
-            MinerRepository.refreshCampaignsOnce(context, session)
-        }
-    }
-
-    fun startMinerService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
                 context,
@@ -397,17 +389,12 @@ private fun MinerDashboard(
                 notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
-        val intent = Intent(context, MinerForegroundService::class.java).apply {
-            action = MinerForegroundService.ACTION_START
+        if (!MinerRepository.state.value.isRunning) {
+            val intent = Intent(context, MinerForegroundService::class.java).apply {
+                action = MinerForegroundService.ACTION_START
+            }
+            ContextCompat.startForegroundService(context, intent)
         }
-        ContextCompat.startForegroundService(context, intent)
-    }
-
-    fun stopMinerService() {
-        val intent = Intent(context, MinerForegroundService::class.java).apply {
-            action = MinerForegroundService.ACTION_STOP
-        }
-        context.startService(intent)
     }
 
     Scaffold(
@@ -453,31 +440,36 @@ private fun MinerDashboard(
                         }
                     }
 
+                    val tabTitles = listOf(
+                        "Главная",
+                        "Дропсы",
+                        "Каналы (${minerState.channels.size})",
+                        "Приоритет"
+                    )
                     TabRow(
                         selectedTabIndex = selectedTab,
                         containerColor = Color(0xFF18181B),
                         contentColor = Color(0xFFBF94FF)
                     ) {
-                        Tab(
-                            selected = selectedTab == 0,
-                            onClick = { selectedTab = 0 },
-                            text = { Text("Главная", fontSize = 12.sp, maxLines = 1) }
-                        )
-                        Tab(
-                            selected = selectedTab == 1,
-                            onClick = { selectedTab = 1 },
-                            text = { Text("Дропсы", fontSize = 12.sp, maxLines = 1) }
-                        )
-                        Tab(
-                            selected = selectedTab == 2,
-                            onClick = { selectedTab = 2 },
-                            text = { Text("Каналы (${minerState.channels.size})", fontSize = 12.sp, maxLines = 1) }
-                        )
-                        Tab(
-                            selected = selectedTab == 3,
-                            onClick = { selectedTab = 3 },
-                            text = { Text("Приоритет", fontSize = 12.sp, maxLines = 1) }
-                        )
+                        tabTitles.forEachIndexed { idx, title ->
+                            Tab(
+                                selected = selectedTab == idx,
+                                onClick = { selectedTab = idx }
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 12.dp, horizontal = 2.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = title,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        color = if (selectedTab == idx) Color(0xFFBF94FF) else Color(0xFFADADB8)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -492,8 +484,6 @@ private fun MinerDashboard(
                 0 -> MainPcStyleTab(
                     minerState = minerState,
                     isBatteryOptimized = isBatteryOptimized,
-                    onStart = ::startMinerService,
-                    onStop = ::stopMinerService,
                     onDisableBatteryOpt = {
                         val intent = Intent(
                             Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -525,9 +515,13 @@ private fun MinerDashboard(
                 )
 
                 3 -> PrioritiesTab(
+                    campaigns = minerState.campaigns,
                     priorityGames = minerState.priorityGames,
                     excludedGames = minerState.excludedGames,
+                    priorityMode = minerState.priorityMode,
+                    onSelectMode = { MinerRepository.setPriorityMode(it) },
                     onAddPriority = { MinerRepository.addPriorityGame(it) },
+                    onAddExcluded = { MinerRepository.addExcludedGame(it) },
                     onMove = { idx, delta -> MinerRepository.movePriorityGame(idx, delta) },
                     onRemovePriority = { MinerRepository.togglePriorityGame(it) },
                     onRemoveExcluded = { MinerRepository.toggleExcludedGame(it) }
@@ -559,8 +553,6 @@ private fun MinerDashboard(
 private fun MainPcStyleTab(
     minerState: MinerUiState,
     isBatteryOptimized: Boolean,
-    onStart: () -> Unit,
-    onStop: () -> Unit,
     onDisableBatteryOpt: () -> Unit
 ) {
     Column(
@@ -569,7 +561,7 @@ private fun MainPcStyleTab(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Статус + кнопка Старт/Стоп
+        // Статус майнера (без кнопки Старт/Стоп — работает автоматически)
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
             shape = RoundedCornerShape(12.dp),
@@ -602,21 +594,16 @@ private fun MainPcStyleTab(
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = { if (minerState.isRunning) onStop() else onStart() },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (minerState.isRunning) Color(0xFFD32F2F) else Color(0xFF9146FF)
-                        ),
+                    Surface(
+                        color = Color(0xFF25252D),
                         shape = RoundedCornerShape(8.dp)
                     ) {
-                        Icon(
-                            imageVector = if (minerState.isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                        Text(
+                            text = minerState.priorityMode.title,
+                            fontSize = 11.sp,
+                            color = Color(0xFFBF94FF),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(if (minerState.isRunning) "Стоп" else "Старт")
                     }
                 }
 
@@ -643,7 +630,7 @@ private fun MainPcStyleTab(
             }
         }
 
-        // Блок Campaign Progress + Drop Progress (как на ПК)
+        // Блок Campaign Progress + Drop Progress
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
             shape = RoundedCornerShape(12.dp),
@@ -759,7 +746,7 @@ private fun MainPcStyleTab(
             }
         }
 
-        // Окно Output (Логи) как внизу Main на ПК
+        // Окно Output (Логи)
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF141417)),
             shape = RoundedCornerShape(12.dp),
@@ -778,7 +765,7 @@ private fun MainPcStyleTab(
                 )
                 if (minerState.logs.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("Нажмите «Старт» для запуска майнинга", color = Color(0xFF71717A), fontSize = 13.sp)
+                        Text("Запуск автомайнера...", color = Color(0xFF71717A), fontSize = 13.sp)
                     }
                 } else {
                     LazyColumn(
@@ -840,7 +827,6 @@ private fun ChannelsTab(
             }
         }
 
-        // Заголовок таблицы как на ПК
         Surface(
             color = Color(0xFF202026),
             shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
@@ -860,7 +846,7 @@ private fun ChannelsTab(
         if (minerState.channels.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    text = "Список каналов появится после запуска майнера или нажатия «Обновить».",
+                    text = "Список каналов появится сразу после выбора активной кампании.",
                     color = Color(0xFFADADB8),
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center,
@@ -984,18 +970,17 @@ private fun InventoryTab(
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf(CampaignFilter.ALL) }
 
-    val filtered = remember(campaigns, searchQuery, selectedFilter) {
+    val filtered = remember(campaigns, searchQuery, selectedFilter, priorityGames) {
         campaigns.filter { c ->
             val matchesQuery = searchQuery.isBlank() ||
                 c.gameName.contains(searchQuery, ignoreCase = true) ||
                 c.name.contains(searchQuery, ignoreCase = true)
 
+            val inPriority = priorityGames.any { it.equals(c.gameName, ignoreCase = true) }
             val matchesFilter = when (selectedFilter) {
                 CampaignFilter.ALL -> true
-                CampaignFilter.ACTIVE -> c.isActive
-                CampaignFilter.UNCLAIMED -> c.hasUnclaimedDrops
-                CampaignFilter.CONNECTED -> c.isAccountConnected
-                CampaignFilter.UPCOMING -> !c.isActive && c.isUpcoming
+                CampaignFilter.ACTIVE -> inPriority && c.isActive && c.hasUnclaimedDrops
+                CampaignFilter.COMPLETED -> inPriority && c.isActive && c.drops.isNotEmpty() && !c.hasUnclaimedDrops
             }
             matchesQuery && matchesFilter
         }
@@ -1021,10 +1006,10 @@ private fun InventoryTab(
             shape = RoundedCornerShape(10.dp)
         )
 
+        // Ровно 3 фильтра: Все / Активные / Выполнены
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp)
                 .padding(bottom = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1034,6 +1019,7 @@ private fun InventoryTab(
                     selected = selectedFilter == filter,
                     onClick = { selectedFilter = filter },
                     label = { Text(filter.label, fontSize = 12.sp) },
+                    modifier = Modifier.weight(1f),
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = Color(0xFF9146FF),
                         selectedLabelColor = Color.White
@@ -1050,8 +1036,23 @@ private fun InventoryTab(
         }
 
         if (filtered.isEmpty()) {
+            val emptyMsg = when {
+                selectedFilter != CampaignFilter.ALL && priorityGames.isEmpty() ->
+                    "В вашем списке приоритетов пока нет игр.\nНажмите ★ на нужных играх во вкладке «Все» или добавьте их в «Приоритет»."
+                selectedFilter == CampaignFilter.ACTIVE ->
+                    "По вашим приоритетным играм сейчас нет активных неполученных дропов."
+                selectedFilter == CampaignFilter.COMPLETED ->
+                    "По вашим приоритетным играм пока нет полностью выполненных активных кампаний."
+                else -> "Ничего не найдено"
+            }
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Ничего не найдено", color = Color(0xFFADADB8))
+                Text(
+                    text = emptyMsg,
+                    color = Color(0xFFADADB8),
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(24.dp)
+                )
             }
             return@Column
         }
@@ -1098,7 +1099,6 @@ private fun PcStyleInventoryCampaignCard(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            // Заголовок кампании
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -1132,7 +1132,6 @@ private fun PcStyleInventoryCampaignCard(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Информация: обложка слева + Active / Ends / Allowed channels справа
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 if (!camp.gameBoxArtUrl.isNullOrBlank()) {
                     AsyncImage(
@@ -1203,7 +1202,6 @@ private fun PcStyleInventoryCampaignCard(
                 }
             }
 
-            // Горизонтальная лента плиток дропов (как на скрине 1 ПК-версии)
             if (camp.drops.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(10.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1334,45 +1332,139 @@ private fun DropTileCard(
 
 @Composable
 private fun PrioritiesTab(
+    campaigns: List<DropCampaignUi>,
     priorityGames: List<String>,
     excludedGames: List<String>,
+    priorityMode: PriorityMode,
+    onSelectMode: (PriorityMode) -> Unit,
     onAddPriority: (String) -> Unit,
+    onAddExcluded: (String) -> Unit,
     onMove: (Int, Int) -> Unit,
     onRemovePriority: (String) -> Unit,
     onRemoveExcluded: (String) -> Unit
 ) {
-    var manualGame by remember { mutableStateOf("") }
+    var gameQuery by remember { mutableStateOf("") }
+
+    val allKnownGames = remember(campaigns) {
+        campaigns.map { it.gameName }.distinctBy { it.lowercase() }.sorted()
+    }
+
+    val suggestions = remember(gameQuery, allKnownGames, priorityGames, excludedGames) {
+        val q = gameQuery.trim()
+        if (q.isEmpty()) emptyList()
+        else allKnownGames.filter { name ->
+            name.contains(q, ignoreCase = true) &&
+                priorityGames.none { it.equals(name, ignoreCase = true) } &&
+                excludedGames.none { it.equals(name, ignoreCase = true) }
+        }.take(8)
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        // Выбор режима приоритета (как в ПК-версии DevilXD)
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
+                border = BorderStroke(1.dp, Color(0xFF2D2D36)),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "Режим выбора кампании",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFBF94FF)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    PriorityMode.entries.forEach { mode ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onSelectMode(mode) }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = priorityMode == mode,
+                                onClick = { onSelectMode(mode) },
+                                colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF9146FF))
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(mode.title, fontSize = 13.sp, color = Color(0xFFEFEFF1))
+                                Text(mode.subtitle, fontSize = 11.sp, color = Color(0xFFADADB8))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Поле ввода с подсказками игр (можно добавить в Приоритет ★ или Исключения 👁)
+        item {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 OutlinedTextField(
-                    value = manualGame,
-                    onValueChange = { manualGame = it },
+                    value = gameQuery,
+                    onValueChange = { gameQuery = it },
                     singleLine = true,
-                    placeholder = { Text("Добавить игру (точное название)", fontSize = 13.sp) },
-                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Введите игру для приоритета или исключения...", fontSize = 13.sp) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                    trailingIcon = {
+                        if (gameQuery.isNotEmpty()) {
+                            IconButton(onClick = { gameQuery = "" }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Очистить", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = {
-                        onAddPriority(manualGame)
-                        manualGame = ""
-                    },
-                    enabled = manualGame.isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9146FF)),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.height(54.dp)
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "Добавить")
+
+                val trimmed = gameQuery.trim()
+                val exactInSuggestions = suggestions.any { it.equals(trimmed, ignoreCase = true) }
+
+                if (suggestions.isNotEmpty() || (trimmed.isNotEmpty() && !exactInSuggestions)) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF202026)),
+                        border = BorderStroke(1.dp, Color(0xFF32323D)),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 6.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(6.dp)) {
+                            suggestions.forEach { gameName ->
+                                SuggestionRow(
+                                    label = gameName,
+                                    onAddPriority = {
+                                        onAddPriority(gameName)
+                                        gameQuery = ""
+                                    },
+                                    onAddExcluded = {
+                                        onAddExcluded(gameName)
+                                        gameQuery = ""
+                                    }
+                                )
+                            }
+                            if (trimmed.isNotEmpty() && !exactInSuggestions) {
+                                SuggestionRow(
+                                    label = "Добавить: $trimmed",
+                                    onAddPriority = {
+                                        onAddPriority(trimmed)
+                                        gameQuery = ""
+                                    },
+                                    onAddExcluded = {
+                                        onAddExcluded(trimmed)
+                                        gameQuery = ""
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1390,10 +1482,10 @@ private fun PrioritiesTab(
         if (priorityGames.isEmpty()) {
             item {
                 Text(
-                    text = "Список пуст. Нажмите ★ в карточке игры во вкладке «Дропсы» или введите название выше.",
+                    text = "Список приоритетов пуст. Найдите игру в поиске выше или нажмите ★ во вкладке «Дропсы».",
                     color = Color(0xFFADADB8),
                     fontSize = 13.sp,
-                    modifier = Modifier.padding(vertical = 8.dp)
+                    modifier = Modifier.padding(vertical = 6.dp)
                 )
             }
         } else {
@@ -1429,16 +1521,25 @@ private fun PrioritiesTab(
             }
         }
 
-        if (excludedGames.isNotEmpty()) {
+        item {
+            Text(
+                text = "Исключения / Чёрный список (${excludedGames.size})",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFFFF8A9B),
+                modifier = Modifier.padding(top = 10.dp)
+            )
+        }
+
+        if (excludedGames.isEmpty()) {
             item {
                 Text(
-                    text = "Чёрный список (пропускаются)",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFFFF8A9B),
-                    modifier = Modifier.padding(top = 12.dp)
+                    text = "Исключений пока нет. Нажмите значок глаза в поиске выше или в карточке игры.",
+                    color = Color(0xFF71717A),
+                    fontSize = 12.sp
                 )
             }
+        } else {
             items(excludedGames) { game ->
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1619)),
@@ -1463,6 +1564,45 @@ private fun PrioritiesTab(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SuggestionRow(
+    label: String,
+    onAddPriority: () -> Unit,
+    onAddExcluded: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            fontSize = 13.sp,
+            color = Color(0xFFEFEFF1),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        IconButton(onClick = onAddPriority, modifier = Modifier.size(34.dp)) {
+            Icon(
+                imageVector = Icons.Default.Star,
+                contentDescription = "В приоритет",
+                tint = Color(0xFFFFCA28),
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        IconButton(onClick = onAddExcluded, modifier = Modifier.size(34.dp)) {
+            Icon(
+                imageVector = Icons.Default.VisibilityOff,
+                contentDescription = "В исключения",
+                tint = Color(0xFFFF8A9B),
+                modifier = Modifier.size(18.dp)
+            )
         }
     }
 }
