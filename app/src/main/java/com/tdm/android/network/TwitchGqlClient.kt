@@ -216,7 +216,9 @@ class TwitchGqlClient(
         for (base in baseList) {
             val id = base["id"].asStr() ?: continue
             val detail = detailsById[id]
-            val gameObj = detail?.get("game").asObj() ?: base["game"].asObj()
+            val detailGame = detail?.get("game").asObj()
+            val baseGame = base["game"].asObj()
+            val gameObj = detailGame ?: baseGame
             val selfObj = detail?.get("self").asObj() ?: base["self"].asObj()
             val allowObj = detail?.get("allow").asObj()
 
@@ -270,7 +272,11 @@ class TwitchGqlClient(
                 )
             }
 
-            val rawBoxArt = gameObj?.get("boxArtURL").asStr()
+            val gameId = detailGame?.get("id").asStr() ?: baseGame?.get("id").asStr()
+            val rawBoxArt = detailGame?.get("boxArtURL").asStr()
+                ?: baseGame?.get("boxArtURL").asStr()
+                ?: gameId?.let { "https://static-cdn.jtvnw.net/ttv-boxart/$it-120x160.jpg" }
+            val finalBoxArt = rawBoxArt
                 ?.replace("{width}", "120")
                 ?.replace("{height}", "160")
 
@@ -283,9 +289,12 @@ class TwitchGqlClient(
                     name = base["name"].asStr() ?: detail?.get("name").asStr() ?: "Campaign",
                     gameName = gameObj?.get("displayName").asStr()
                         ?: gameObj?.get("name").asStr()
+                        ?: baseGame?.get("displayName").asStr()
                         ?: "Unknown Game",
-                    gameSlug = gameObj?.get("slug").asStr() ?: "",
-                    gameBoxArtUrl = rawBoxArt,
+                    gameSlug = gameObj?.get("slug").asStr()
+                        ?: baseGame?.get("slug").asStr()
+                        ?: "",
+                    gameBoxArtUrl = finalBoxArt,
                     accountLinkUrl = accountLink,
                     status = base["status"].asStr() ?: "ACTIVE",
                     isAccountConnected = selfObj?.get("isAccountConnected").asBool() ?: true,
