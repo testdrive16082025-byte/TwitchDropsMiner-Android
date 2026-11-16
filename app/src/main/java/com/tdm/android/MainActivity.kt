@@ -16,7 +16,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -61,6 +60,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.tdm.android.data.AuthStorage
+import com.tdm.android.data.DropBenefitUi
 import com.tdm.android.data.DropCampaignUi
 import com.tdm.android.data.LiveStreamCandidate
 import com.tdm.android.data.MinerUiState
@@ -378,7 +378,6 @@ private fun MinerDashboard(
         pm != null && !pm.isIgnoringBatteryOptimizations(context.packageName)
     }
 
-    // Автоматический запуск майнера при входе в приложение
     LaunchedEffect(session.userId) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
@@ -561,7 +560,6 @@ private fun MainPcStyleTab(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Статус майнера (без кнопки Старт/Стоп — работает автоматически)
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
             shape = RoundedCornerShape(12.dp),
@@ -630,7 +628,6 @@ private fun MainPcStyleTab(
             }
         }
 
-        // Блок Campaign Progress + Drop Progress
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
             shape = RoundedCornerShape(12.dp),
@@ -746,7 +743,6 @@ private fun MainPcStyleTab(
             }
         }
 
-        // Окно Output (Логи)
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF141417)),
             shape = RoundedCornerShape(12.dp),
@@ -1006,7 +1002,6 @@ private fun InventoryTab(
             shape = RoundedCornerShape(10.dp)
         )
 
-        // Ровно 3 фильтра: Все / Активные / Выполнены
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1090,6 +1085,15 @@ private fun PcStyleInventoryCampaignCard(
     onManualClaim: (String, String, String) -> Unit,
     onOpenLink: (String) -> Unit
 ) {
+    val expandedBenefits = remember(camp.drops) {
+        camp.drops.flatMap { drop ->
+            val list = drop.benefits.ifEmpty {
+                listOf(DropBenefitUi(drop.benefitId, drop.benefitName, drop.imageUrl))
+            }
+            list.map { benefit -> drop to benefit }
+        }
+    }
+
     Card(
         colors = CardDefaults.cardColors(
             containerColor = if (isExcluded) Color(0xFF1F1619) else Color(0xFF18181B)
@@ -1202,16 +1206,20 @@ private fun PcStyleInventoryCampaignCard(
                 }
             }
 
-            if (camp.drops.isNotEmpty()) {
+            if (expandedBenefits.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(10.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(camp.drops, key = { it.id }) { drop ->
+                    itemsIndexed(
+                        items = expandedBenefits,
+                        key = { index, pair -> "${pair.first.id}_${pair.second.id}_$index" }
+                    ) { _, (drop, benefit) ->
                         DropTileCard(
                             drop = drop,
+                            benefit = benefit,
                             onManualClaim = {
                                 val inst = drop.dropInstanceId
                                 if (!inst.isNullOrBlank()) {
-                                    onManualClaim(inst, drop.benefitName, camp.gameName)
+                                    onManualClaim(inst, benefit.name, camp.gameName)
                                 }
                             }
                         )
@@ -1225,6 +1233,7 @@ private fun PcStyleInventoryCampaignCard(
 @Composable
 private fun DropTileCard(
     drop: TimedDropUi,
+    benefit: DropBenefitUi,
     onManualClaim: () -> Unit
 ) {
     Surface(
@@ -1241,7 +1250,7 @@ private fun DropTileCard(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = drop.benefitName,
+                text = benefit.name,
                 fontSize = 11.sp,
                 color = Color(0xFFEFEFF1),
                 maxLines = 2,
@@ -1253,10 +1262,11 @@ private fun DropTileCard(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            if (!drop.imageUrl.isNullOrBlank()) {
+            val img = benefit.imageUrl ?: drop.imageUrl
+            if (!img.isNullOrBlank()) {
                 AsyncImage(
-                    model = drop.imageUrl,
-                    contentDescription = drop.benefitName,
+                    model = img,
+                    contentDescription = benefit.name,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .size(58.dp)
@@ -1364,7 +1374,6 @@ private fun PrioritiesTab(
         contentPadding = PaddingValues(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // Выбор режима приоритета (как в ПК-версии DevilXD)
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
@@ -1404,7 +1413,6 @@ private fun PrioritiesTab(
             }
         }
 
-        // Поле ввода с подсказками игр (можно добавить в Приоритет ★ или Исключения 👁)
         item {
             Column(modifier = Modifier.fillMaxWidth()) {
                 OutlinedTextField(
