@@ -15,12 +15,19 @@ data class AllowedChannel(
     val displayName: String
 )
 
+data class DropBenefitUi(
+    val id: String,
+    val name: String,
+    val imageUrl: String?
+)
+
 data class TimedDropUi(
     val id: String,
     val name: String,
     val benefitId: String,
     val benefitName: String,
     val imageUrl: String?,
+    val benefits: List<DropBenefitUi> = emptyList(),
     val requiredMinutes: Int,
     val currentMinutes: Int,
     val isClaimed: Boolean,
