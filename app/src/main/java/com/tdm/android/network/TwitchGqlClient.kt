@@ -1,6 +1,7 @@
 package com.tdm.android.network
 
 import com.tdm.android.data.AllowedChannel
+import com.tdm.android.data.DropBenefitUi
 import com.tdm.android.data.DropCampaignUi
 import com.tdm.android.data.LiveStreamCandidate
 import com.tdm.android.data.TimedDropUi
@@ -154,11 +155,16 @@ class TwitchGqlClient(
         val inventoryObj = invResp["data"].asObj()?.get("currentUser").asObj()?.get("inventory").asObj()
 
         val progressMap = mutableMapOf<String, MutableMap<String, DropProgressSnapshot>>()
+        val inProgressDropsFallback = mutableMapOf<String, JsonArray>()
         inventoryObj?.get("dropCampaignsInProgress").asArr()?.forEach { campEl ->
             val campObj = campEl.asObj() ?: return@forEach
             val campId = campObj["id"].asStr() ?: return@forEach
+            val dropsArr = campObj["timeBasedDrops"].asArr()
+            if (dropsArr != null) {
+                inProgressDropsFallback[campId] = dropsArr
+            }
             val map = progressMap.getOrPut(campId) { mutableMapOf() }
-            campObj["timeBasedDrops"].asArr()?.forEach { dropEl ->
+            dropsArr?.forEach { dropEl ->
                 val dropObj = dropEl.asObj() ?: return@forEach
                 val dropId = dropObj["id"].asStr() ?: return@forEach
                 val selfObj = dropObj["self"].asObj()
@@ -193,7 +199,7 @@ class TwitchGqlClient(
         }
 
         val detailsById = mutableMapOf<String, JsonObject>()
-        val chunks = baseList.mapNotNull { it["id"].asStr() }.chunked(15)
+        val chunks = baseList.mapNotNull { it["id"].asStr() }.chunked(8)
         for (chunkIds in chunks) {
             val batchReq = chunkIds.map { cid ->
                 "CampaignDetails" to buildJsonObject {
@@ -201,7 +207,7 @@ class TwitchGqlClient(
                     put("dropID", cid)
                 }
             }
-            val batchResp = gqlBatch(batchReq)
+            val batchResp = runCatching { gqlBatch(batchReq) }.getOrDefault(emptyList())
             for (respObj in batchResp) {
                 val cObj = respObj["data"].asObj()?.get("user").asObj()?.get("dropCampaign").asObj()
                     ?: continue
@@ -232,7 +238,13 @@ class TwitchGqlClient(
             }
 
             val campProgress = progressMap[id].orEmpty()
-            val dropsArr = detail?.get("timeBasedDrops").asArr().orEmpty()
+            val detailDrops = detail?.get("timeBasedDrops").asArr()
+            val dropsArr = if (!detailDrops.isNullOrEmpty()) {
+                detailDrops
+            } else {
+                inProgressDropsFallback[id] ?: JsonArray(emptyList())
+            }
+
             val drops = dropsArr.mapNotNull { dEl ->
                 val dObj = dEl.asObj() ?: return@mapNotNull null
                 val dropId = dObj["id"].asStr() ?: return@mapNotNull null
@@ -240,18 +252,32 @@ class TwitchGqlClient(
                 val reqMin = dObj["requiredMinutesWatched"].asInt() ?: 0
                 val prog = campProgress[dropId]
 
-                val firstBenefit = dObj["benefitEdges"].asArr()?.firstOrNull()
-                    ?.asObj()?.get("benefit").asObj()
-                val benefitId = firstBenefit?.get("id").asStr().orEmpty()
-                val benefitName = firstBenefit?.get("name").asStr() ?: dropName
-                val benefitImage = firstBenefit?.get("imageAssetURL").asStr()
+                val benefits = dObj["benefitEdges"].asArr().orEmpty().mapNotNull { edgeEl ->
+                    val bObj = edgeEl.asObj()?.get("benefit").asObj() ?: return@mapNotNull null
+                    val bId = bObj["id"].asStr().orEmpty()
+                    val bName = bObj["name"].asStr() ?: return@mapNotNull null
+                    val bImg = bObj["imageAssetURL"].asStr()
+                    DropBenefitUi(bId, bName, bImg)
+                }
+
+                val firstBenefit = benefits.firstOrNull()
+                val benefitId = firstBenefit?.id.orEmpty()
+                val joinedName = if (benefits.isNotEmpty()) {
+                    benefits.joinToString(", ") { it.name }
+                } else {
+                    dropName
+                }
+                val benefitImage = firstBenefit?.imageUrl
 
                 val dropStartMs = parseIsoTime(dObj["startAt"].asStr())
                 val dropEndMs = parseIsoTime(dObj["endAt"].asStr())
-                val matchedInInventory = benefitId.isNotBlank() &&
-                    dropStartMs > 0L &&
+                val matchedInInventory = dropStartMs > 0L &&
                     dropEndMs > 0L &&
-                    claimedBenefits.any { it.benefitId == benefitId && it.lastAwardedAtMs in dropStartMs..dropEndMs }
+                    benefits.any { b ->
+                        b.id.isNotBlank() && claimedBenefits.any {
+                            it.benefitId == b.id && it.lastAwardedAtMs in dropStartMs..dropEndMs
+                        }
+                    }
 
                 val curMin = prog?.currentMinutes ?: 0
                 val claimed = (prog?.isClaimed ?: false) || matchedInInventory
@@ -261,8 +287,11 @@ class TwitchGqlClient(
                     id = dropId,
                     name = dropName,
                     benefitId = benefitId,
-                    benefitName = benefitName,
+                    benefitName = joinedName,
                     imageUrl = benefitImage,
+                    benefits = benefits.ifEmpty {
+                        listOf(DropBenefitUi(benefitId, dropName, benefitImage))
+                    },
                     requiredMinutes = reqMin,
                     currentMinutes = if (claimed && reqMin > 0) maxOf(curMin, reqMin) else curMin,
                     isClaimed = claimed,
