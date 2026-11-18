@@ -1,9 +1,12 @@
 package com.tdm.android.miner
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import androidx.core.content.ContextCompat
 import com.tdm.android.data.AuthStorage
 import com.tdm.android.data.CampaignFilter
 import com.tdm.android.data.DropCampaignUi
@@ -75,39 +78,54 @@ object MinerRepository {
 
     fun registerNetworkCallback(context: Context) {
         if (networkCallback != null) return
-        val cm = context.applicationContext.getSystemService(ConnectivityManager::class.java) ?: return
-        val activeCaps = cm.getNetworkCapabilities(cm.activeNetwork)
-        isNetworkAvailable = activeCaps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-
-        val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                val wasOffline = !isNetworkAvailable
-                isNetworkAvailable = true
-                if (wasOffline) {
-                    addLog("Интернет восстановлен, продолжаю работу.")
-                    wakeSignal?.complete(Unit)
-                }
-            }
-
-            override fun onLost(network: Network) {
-                val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-                isNetworkAvailable = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-                if (!isNetworkAvailable) {
-                    addLog("Интернет потерян, ожидание сети...")
-                }
-            }
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_NETWORK_STATE
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasPermission) {
+            isNetworkAvailable = true
+            return
         }
+
         runCatching {
+            val cm = context.applicationContext.getSystemService(ConnectivityManager::class.java) ?: return
+            val activeCaps = cm.getNetworkCapabilities(cm.activeNetwork)
+            isNetworkAvailable = activeCaps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    val wasOffline = !isNetworkAvailable
+                    isNetworkAvailable = true
+                    if (wasOffline) {
+                        addLog("Интернет восстановлен, продолжаю работу.")
+                        wakeSignal?.complete(Unit)
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    runCatching {
+                        val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+                        isNetworkAvailable = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+                        if (!isNetworkAvailable) {
+                            addLog("Интернет потерян, ожидание сети...")
+                        }
+                    }
+                }
+            }
             cm.registerDefaultNetworkCallback(cb)
             networkCallback = cb
+        }.onFailure {
+            isNetworkAvailable = true
         }
     }
 
     fun unregisterNetworkCallback(context: Context) {
         val cb = networkCallback ?: return
         networkCallback = null
-        val cm = context.applicationContext.getSystemService(ConnectivityManager::class.java) ?: return
-        runCatching { cm.unregisterNetworkCallback(cb) }
+        runCatching {
+            val cm = context.applicationContext.getSystemService(ConnectivityManager::class.java) ?: return
+            cm.unregisterNetworkCallback(cb)
+        }
     }
 
     fun addLog(message: String) {
@@ -862,7 +880,6 @@ object MinerRepository {
                 return
             }
 
-            // Каждые 20 минут фоново сверяем список кампаний без разрыва текущего потока, если приоритет не сменился
             if (System.currentTimeMillis() - sessionCheckStartMs >= 20 * 60_000L) {
                 sessionCheckStartMs = System.currentTimeMillis()
                 val refreshed = runCatching { gql.fetchCampaigns() }.getOrElse { err ->
