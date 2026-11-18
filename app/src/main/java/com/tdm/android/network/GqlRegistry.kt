@@ -1,14 +1,19 @@
 package com.tdm.android.network
 
+import android.content.Context
+import android.content.SharedPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,9 +28,17 @@ data class GqlQueryDef(
 object GqlRegistry {
     private const val DEVILXD_CONSTANTS_URL =
         "https://raw.githubusercontent.com/DevilXD/TwitchDropsMiner/master/constants.py"
+    private const val PREFS_NAME = "tdm_gql_cache"
+    private const val KEY_CACHED_JSON = "cached_registry_json"
 
     private val json = Json { ignoreUnknownKeys = true }
     private val syncMutex = Mutex()
+
+    @Volatile
+    private var cachePrefs: SharedPreferences? = null
+
+    @Volatile
+    private var cacheLoaded: Boolean = false
 
     @Volatile
     var androidUserAgent: String =
@@ -80,8 +93,8 @@ object GqlRegistry {
                 put("includeIsDJ", false)
                 put("sortTypeIsRecency", false)
                 put("options", buildJsonObject {
-                    put("includeRestricted", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("SUB_ONLY_LIVE")) })
-                    put("systemFilters", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("DROPS_ENABLED")) })
+                    put("includeRestricted", buildJsonArray { add(JsonPrimitive("SUB_ONLY_LIVE")) })
+                    put("systemFilters", buildJsonArray { add(JsonPrimitive("DROPS_ENABLED")) })
                     put("sort", "VIEWER_COUNT")
                 })
             }
@@ -104,6 +117,15 @@ object GqlRegistry {
         )
     )
 
+    fun initCache(context: Context) {
+        if (cachePrefs == null) {
+            cachePrefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        }
+        if (cacheLoaded) return
+        cacheLoaded = true
+        loadCache()
+    }
+
     fun get(key: String): GqlQueryDef? = synchronized(queries) { queries[key] }
 
     suspend fun syncFromDevilXd(client: OkHttpClient, force: Boolean, log: (String) -> Unit): Boolean {
@@ -115,18 +137,68 @@ object GqlRegistry {
                     val req = Request.Builder().url(DEVILXD_CONSTANTS_URL).get().build()
                     client.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) {
-                            log("Не удалось загрузить constants.py (HTTP ${resp.code}), использую встроенные хеши.")
+                            log("Не удалось загрузить constants.py (HTTP ${resp.code}), использую кэш/встроенные хеши.")
                             return@withContext false
                         }
                         val pyText = resp.body?.string().orEmpty()
                         val updatedCount = parsePythonConstants(pyText)
                         hasSyncedOnce = true
+                        if (updatedCount > 0) {
+                            saveCache()
+                        }
                         log("Синхронизация GQL с DevilXD: обновлено $updatedCount запросов.")
                         updatedCount > 0
                     }
                 } catch (e: Exception) {
                     log("Ошибка синхронизации constants.py: ${e.message}")
                     false
+                }
+            }
+        }
+    }
+
+    private fun saveCache() {
+        val prefs = cachePrefs ?: return
+        runCatching {
+            val payload = synchronized(queries) {
+                buildJsonObject {
+                    put("ua", androidUserAgent)
+                    put("queries", buildJsonObject {
+                        queries.forEach { (key, def) ->
+                            put(key, buildJsonObject {
+                                put("op", def.operationName)
+                                put("hash", def.sha256Hash)
+                                put("vars", def.defaultVariables)
+                            })
+                        }
+                    })
+                }.toString()
+            }
+            prefs.edit().putString(KEY_CACHED_JSON, payload).apply()
+        }
+    }
+
+    private fun loadCache() {
+        val raw = cachePrefs?.getString(KEY_CACHED_JSON, null) ?: return
+        runCatching {
+            val root = json.parseToJsonElement(raw).jsonObject
+            root["ua"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let {
+                androidUserAgent = it
+            }
+            val cachedQueries = root["queries"]?.jsonObject ?: return
+            synchronized(queries) {
+                cachedQueries.forEach { (key, el) ->
+                    val obj = el.jsonObject
+                    val op = obj["op"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                    val hash = obj["hash"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                    if (!hash.matches(Regex("^[a-fA-F0-9]{64}$"))) return@forEach
+                    val vars = obj["vars"] as? JsonObject ?: queries[key]?.defaultVariables ?: buildJsonObject {}
+                    queries[key] = GqlQueryDef(
+                        key = key,
+                        operationName = op,
+                        sha256Hash = hash,
+                        defaultVariables = vars
+                    )
                 }
             }
         }
@@ -152,7 +224,7 @@ object GqlRegistry {
             if (!hash.matches(Regex("^[a-fA-F0-9]{64}$"))) continue
 
             var varsObj: JsonObject? = null
-            val braceStart = block.indexOf('{')
+            val braceStart = findUncommentedBrace(block)
             if (braceStart >= 0) {
                 val braceEnd = findBalancedEnd(block, braceStart, '{', '}')
                 if (braceEnd != null) {
@@ -175,45 +247,122 @@ object GqlRegistry {
         return count
     }
 
+    private fun findUncommentedBrace(block: String): Int {
+        var inSingle = false
+        var inDouble = false
+        var escaped = false
+        var i = 0
+        while (i < block.length) {
+            val c = block[i]
+            if (escaped) {
+                escaped = false
+                i++
+                continue
+            }
+            if ((inSingle || inDouble) && c == '\\') {
+                escaped = true
+                i++
+                continue
+            }
+            if (!inDouble && c == '\'') {
+                inSingle = !inSingle
+                i++
+                continue
+            }
+            if (!inSingle && c == '"') {
+                inDouble = !inDouble
+                i++
+                continue
+            }
+            if (!inSingle && !inDouble) {
+                if (c == '#') {
+                    while (i < block.length && block[i] != '\n') i++
+                    continue
+                }
+                if (c == '{') return i
+            }
+            i++
+        }
+        return -1
+    }
+
     private fun findBalancedEnd(text: String, startIdx: Int, openCh: Char, closeCh: Char): Int? {
         var depth = 0
         var inSingle = false
         var inDouble = false
         var escaped = false
-        for (i in startIdx until text.length) {
+        var i = startIdx
+        while (i < text.length) {
             val c = text[i]
             if (escaped) {
                 escaped = false
+                i++
                 continue
             }
             if ((inSingle || inDouble) && c == '\\') {
                 escaped = true
+                i++
                 continue
             }
             if (!inDouble && c == '\'') {
                 inSingle = !inSingle
+                i++
                 continue
             }
             if (!inSingle && c == '"') {
                 inDouble = !inDouble
+                i++
                 continue
             }
-            if (inSingle || inDouble) continue
+            if (inSingle || inDouble) {
+                i++
+                continue
+            }
+            if (c == '#') {
+                while (i < text.length && text[i] != '\n') i++
+                continue
+            }
             if (c == openCh) depth++
             else if (c == closeCh) {
                 depth--
                 if (depth == 0) return i
             }
+            i++
         }
         return null
     }
 
     private fun extractQuotedStrings(block: String): List<String> {
         val result = mutableListOf<String>()
-        val strRegex = Regex("""["']([^"']+)["']""")
-        for (m in strRegex.findAll(block)) {
-            result.add(m.groupValues[1])
-            if (result.size >= 2) break
+        var i = 0
+        while (i < block.length && result.size < 2) {
+            val c = block[i]
+            if (c == '#') {
+                while (i < block.length && block[i] != '\n') i++
+                continue
+            }
+            if (c == '"' || c == '\'') {
+                val quote = c
+                val sb = StringBuilder()
+                i++
+                while (i < block.length) {
+                    val ch = block[i]
+                    if (ch == '\\' && i + 1 < block.length) {
+                        sb.append(block[i + 1])
+                        i += 2
+                        continue
+                    }
+                    if (ch == quote) {
+                        i++
+                        break
+                    }
+                    sb.append(ch)
+                    i++
+                }
+                result.add(sb.toString())
+                continue
+            }
+            i++
         }
         return result
     }
