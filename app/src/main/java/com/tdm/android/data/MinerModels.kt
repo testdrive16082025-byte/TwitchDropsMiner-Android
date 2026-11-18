@@ -9,16 +9,16 @@ enum class PriorityMode(val title: String, val subtitle: String) {
     LOWEST_AVAILABILITY("Редкие каналы", "Сначала кампании, доступные у 1–нескольких стримеров")
 }
 
+enum class CampaignFilter(val label: String) {
+    ALL("Все"),
+    ACTIVE("Активные"),
+    COMPLETED("Выполнены")
+}
+
 data class AllowedChannel(
     val id: String,
     val login: String,
     val displayName: String
-)
-
-data class DropBenefitUi(
-    val id: String,
-    val name: String,
-    val imageUrl: String?
 )
 
 data class TimedDropUi(
@@ -27,7 +27,6 @@ data class TimedDropUi(
     val benefitId: String,
     val benefitName: String,
     val imageUrl: String?,
-    val benefits: List<DropBenefitUi> = emptyList(),
     val requiredMinutes: Int,
     val currentMinutes: Int,
     val isClaimed: Boolean,
@@ -137,6 +136,8 @@ data class MinerUiState(
     val priorityMode: PriorityMode = PriorityMode.LIST_ORDER,
     val priorityOnly: Boolean = false,
     val skipUnconnected: Boolean = false,
+    val lastDropsFilter: CampaignFilter = CampaignFilter.ALL,
+    val sessionExpired: Boolean = false,
     val claimedSessionCount: Int = 0,
     val totalClaimedAllTime: Int = 0,
     val lastClaimedSeq: Long = 0L,
@@ -167,6 +168,16 @@ class MinerPreferences(context: Context) {
 
     fun setPriorityMode(mode: PriorityMode) {
         prefs.edit().putString(KEY_PRIORITY_MODE, mode.name).apply()
+    }
+
+    fun getLastDropsFilter(): CampaignFilter {
+        val raw = prefs.getString(KEY_LAST_DROPS_FILTER, CampaignFilter.ALL.name)
+        return runCatching { CampaignFilter.valueOf(raw ?: CampaignFilter.ALL.name) }
+            .getOrDefault(CampaignFilter.ALL)
+    }
+
+    fun setLastDropsFilter(filter: CampaignFilter) {
+        prefs.edit().putString(KEY_LAST_DROPS_FILTER, filter.name).apply()
     }
 
     fun isPriorityOnly(): Boolean = prefs.getBoolean(KEY_PRIORITY_ONLY, false)
@@ -202,6 +213,7 @@ class MinerPreferences(context: Context) {
         private const val KEY_PRIORITY_GAMES = "priority_games"
         private const val KEY_EXCLUDED_GAMES = "excluded_games"
         private const val KEY_PRIORITY_MODE = "priority_mode"
+        private const val KEY_LAST_DROPS_FILTER = "last_drops_filter"
         private const val KEY_PRIORITY_ONLY = "priority_only"
         private const val KEY_SKIP_UNCONNECTED = "skip_unconnected"
         private const val KEY_TOTAL_CLAIMED = "total_claimed_all_time"
