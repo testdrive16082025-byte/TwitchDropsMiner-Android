@@ -181,11 +181,34 @@ class TwitchGqlClient(
             }
         }
 
-        val campResp = gqlSingle("Campaigns")
-        val rawCampaigns = campResp["data"].asObj()
-            ?.get("currentUser").asObj()
-            ?.get("dropCampaigns").asArr()
-            .orEmpty()
+        var campResp: JsonObject? = null
+        var rawCampaigns: JsonArray? = null
+        val retryDelaysMs = listOf(2000L, 3000L, 4000L)
+
+        for (attempt in 0..retryDelaysMs.size) {
+            campResp = gqlSingle("Campaigns", allowRetry = attempt == 0)
+            rawCampaigns = campResp["data"].asObj()
+                ?.get("currentUser").asObj()
+                ?.get("dropCampaigns").asArr()
+            if (rawCampaigns != null) break
+            if (attempt < retryDelaysMs.size) {
+                delay(retryDelaysMs[attempt])
+            }
+        }
+
+        if (rawCampaigns == null) {
+            val messages = campResp?.get("errors").asArr()
+                ?.mapNotNull { it.asObj()?.get("message").asStr() }
+                .orEmpty()
+            val detail = if (messages.isNotEmpty()) {
+                messages.groupingBy { it }.eachCount().entries.joinToString { (m, c) ->
+                    if (c > 1) "$m (x$c)" else m
+                }
+            } else {
+                "пустой ответ dropCampaigns"
+            }
+            throw IllegalStateException("Twitch не вернул кампании: $detail")
+        }
 
         val baseList = rawCampaigns.mapNotNull { it.asObj() }.filter { obj ->
             val st = obj["status"].asStr().orEmpty()
