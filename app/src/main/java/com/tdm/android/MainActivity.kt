@@ -12,7 +12,6 @@ import android.webkit.CookieManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -39,14 +38,12 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
@@ -64,9 +61,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.LifecycleOwner
 import coil.compose.AsyncImage
 import com.tdm.android.data.AuthStorage
 import com.tdm.android.data.CampaignFilter
@@ -88,7 +82,6 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
         MinerRepository.initPreferences(applicationContext)
         setContent {
             TwitchMinerTheme {
@@ -142,20 +135,6 @@ fun AppRoot() {
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var showManualDialog by remember { mutableStateOf(false) }
 
-    fun performLogout(reason: String?) {
-        context.startService(
-            Intent(context, MinerForegroundService::class.java).apply {
-                action = MinerForegroundService.ACTION_STOP
-            }
-        )
-        MinerRepository.clearSessionState()
-        authStorage.clearSession()
-        CookieManager.getInstance().removeAllCookies(null)
-        CookieManager.getInstance().flush()
-        errorMessage = reason
-        uiState = AuthUiState.LoggedOut
-    }
-
     fun verifyAndSaveToken(token: String) {
         scope.launch {
             uiState = AuthUiState.Validating
@@ -208,9 +187,7 @@ fun AppRoot() {
         AuthUiState.Checking, AuthUiState.Validating -> {
             Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .safeDrawingPadding(),
+                    modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -238,8 +215,18 @@ fun AppRoot() {
         is AuthUiState.LoggedIn -> {
             MinerDashboard(
                 session = state.session,
-                onLogout = { performLogout(null) },
-                onSessionExpired = { performLogout("Сессия Twitch истекла, войдите снова.") }
+                onLogout = {
+                    context.startService(
+                        Intent(context, MinerForegroundService::class.java).apply {
+                            action = MinerForegroundService.ACTION_STOP
+                        }
+                    )
+                    authStorage.clearSession()
+                    CookieManager.getInstance().removeAllCookies(null)
+                    CookieManager.getInstance().flush()
+                    errorMessage = null
+                    uiState = AuthUiState.LoggedOut
+                }
             )
         }
 
@@ -296,7 +283,6 @@ private fun LoginWelcomeView(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .safeDrawingPadding()
                 .padding(20.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
@@ -373,56 +359,20 @@ private fun LoginWelcomeView(
 @Composable
 private fun MinerDashboard(
     session: TwitchSession,
-    onLogout: () -> Unit,
-    onSessionExpired: () -> Unit
+    onLogout: () -> Unit
 ) {
     val context = LocalContext.current
     val minerState by MinerRepository.state.collectAsState()
     var selectedTab by remember { mutableIntStateOf(0) }
     var showSettingsDialog by remember { mutableStateOf(false) }
 
-    fun checkBatteryOpt(): Boolean {
-        val pm = context.getSystemService(PowerManager::class.java)
-        return pm != null && !pm.isIgnoringBatteryOptimizations(context.packageName)
-    }
-
-    var isBatteryOptimized by remember { mutableStateOf(checkBatteryOpt()) }
-
-    val lifecycleOwner = context as? LifecycleOwner
-    DisposableEffect(lifecycleOwner) {
-        if (lifecycleOwner == null) return@DisposableEffect onDispose {}
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                isBatteryOptimized = checkBatteryOpt()
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    LaunchedEffect(minerState.sessionExpired) {
-        if (minerState.sessionExpired) {
-            onSessionExpired()
-        }
-    }
-
     val notifLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { }
 
-    fun startMinerService() {
-        val intent = Intent(context, MinerForegroundService::class.java).apply {
-            action = MinerForegroundService.ACTION_START
-        }
-        ContextCompat.startForegroundService(context, intent)
-    }
-
-    fun stopMinerService() {
-        context.startService(
-            Intent(context, MinerForegroundService::class.java).apply {
-                action = MinerForegroundService.ACTION_STOP
-            }
-        )
+    val isBatteryOptimized = remember(minerState.isRunning, showSettingsDialog) {
+        val pm = context.getSystemService(PowerManager::class.java)
+        pm != null && !pm.isIgnoringBatteryOptimizations(context.packageName)
     }
 
     // Автоматический запуск майнера при входе в приложение
@@ -437,7 +387,10 @@ private fun MinerDashboard(
             }
         }
         if (!MinerRepository.state.value.isRunning) {
-            startMinerService()
+            val intent = Intent(context, MinerForegroundService::class.java).apply {
+                action = MinerForegroundService.ACTION_START
+            }
+            ContextCompat.startForegroundService(context, intent)
         }
     }
 
@@ -445,11 +398,7 @@ private fun MinerDashboard(
         containerColor = Color(0xFF0E0E10),
         topBar = {
             Surface(color = Color(0xFF18181B)) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
-                ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -529,8 +478,6 @@ private fun MinerDashboard(
                 0 -> MainPcStyleTab(
                     minerState = minerState,
                     isBatteryOptimized = isBatteryOptimized,
-                    onStartMining = { startMinerService() },
-                    onStopMining = { stopMinerService() },
                     onDisableBatteryOpt = {
                         val intent = Intent(
                             Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -606,8 +553,6 @@ private fun MinerDashboard(
 private fun MainPcStyleTab(
     minerState: MinerUiState,
     isBatteryOptimized: Boolean,
-    onStartMining: () -> Unit,
-    onStopMining: () -> Unit,
     onDisableBatteryOpt: () -> Unit
 ) {
     Column(
@@ -616,6 +561,7 @@ private fun MainPcStyleTab(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // Статус майнера (без кнопки Старт/Стоп — работает автоматически)
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
             shape = RoundedCornerShape(12.dp),
@@ -648,33 +594,16 @@ private fun MainPcStyleTab(
                             )
                         }
                     }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Surface(
+                        color = Color(0xFF25252D),
+                        shape = RoundedCornerShape(8.dp)
                     ) {
-                        Surface(
-                            color = Color(0xFF25252D),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text(
-                                text = minerState.priorityMode.title,
-                                fontSize = 11.sp,
-                                color = Color(0xFFBF94FF),
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
-                        }
-
-                        IconButton(
-                            onClick = if (minerState.isRunning) onStopMining else onStartMining,
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (minerState.isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
-                                contentDescription = if (minerState.isRunning) "Остановить" else "Запустить",
-                                tint = if (minerState.isRunning) Color(0xFFFF8A9B) else Color(0xFF00E676)
-                            )
-                        }
+                        Text(
+                            text = minerState.priorityMode.title,
+                            fontSize = 11.sp,
+                            color = Color(0xFFBF94FF),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
                     }
                 }
 
@@ -701,6 +630,7 @@ private fun MainPcStyleTab(
             }
         }
 
+        // Блок Campaign Progress + Drop Progress
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF18181B)),
             shape = RoundedCornerShape(12.dp),
@@ -816,6 +746,7 @@ private fun MainPcStyleTab(
             }
         }
 
+        // Окно Output (Логи)
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF141417)),
             shape = RoundedCornerShape(12.dp),
@@ -842,20 +773,11 @@ private fun MainPcStyleTab(
                         verticalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
                         items(minerState.logs.asReversed()) { line ->
-                            val lineColor = when {
-                                line.contains("ЗАБРАН ДРОП", ignoreCase = true) -> Color(0xFF00E676)
-                                line.contains("ошибка", ignoreCase = true) ||
-                                    line.contains("истекла", ignoreCase = true) -> Color(0xFFFF8A9B)
-                                line.contains("меняю", ignoreCase = true) ||
-                                    line.contains("переключаюсь", ignoreCase = true) ||
-                                    line.contains("прервался", ignoreCase = true) -> Color(0xFFFFCA28)
-                                else -> Color(0xFFD4D4D8)
-                            }
                             Text(
                                 text = line,
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace,
-                                color = lineColor
+                                color = Color(0xFFD4D4D8)
                             )
                         }
                     }
@@ -980,7 +902,7 @@ private fun ChannelRowItem(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = stream.title.ifBlank { stream.gameName },
+                    text = stream.gameName,
                     fontSize = 11.sp,
                     color = Color(0xFFADADB8),
                     maxLines = 1,
@@ -1085,6 +1007,7 @@ private fun InventoryTab(
             shape = RoundedCornerShape(10.dp)
         )
 
+        // Ровно 3 фильтра: Все / Активные / Выполнены (выбор запоминается)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
