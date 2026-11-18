@@ -1,12 +1,6 @@
 package com.tdm.android.miner
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import androidx.core.content.ContextCompat
 import com.tdm.android.data.AuthStorage
 import com.tdm.android.data.CampaignFilter
 import com.tdm.android.data.DropCampaignUi
@@ -17,7 +11,6 @@ import com.tdm.android.data.PriorityMode
 import com.tdm.android.data.TwitchSession
 import com.tdm.android.network.GqlRegistry
 import com.tdm.android.network.TwitchAuthApi
-import com.tdm.android.network.TwitchAuthExpiredException
 import com.tdm.android.network.TwitchGqlClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -25,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,9 +26,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import java.time.LocalTime
-import java.time.format.DateTimeFormatter
-import java.util.concurrent.ConcurrentHashMap
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 object MinerRepository {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -43,22 +37,16 @@ object MinerRepository {
 
     private var minerJob: Job? = null
     private var prefs: MinerPreferences? = null
-    private val timeFormat: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
-    private val channelCooldowns = ConcurrentHashMap<String, Long>()
+    private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    private val channelCooldowns = mutableMapOf<String, Long>()
 
     @Volatile
-    private var wakeSignal: CompletableDeferred<Unit>? = null
+    private var switchSignal: CompletableDeferred<Unit>? = null
 
     @Volatile
     private var preferredChannelLogin: String? = null
 
-    @Volatile
-    private var isNetworkAvailable: Boolean = true
-
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
-
     fun initPreferences(context: Context) {
-        GqlRegistry.initCache(context)
         if (prefs == null) {
             prefs = MinerPreferences(context.applicationContext)
         }
@@ -76,86 +64,11 @@ object MinerRepository {
         }
     }
 
-    fun registerNetworkCallback(context: Context) {
-        if (networkCallback != null) return
-        val hasPermission = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_NETWORK_STATE
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!hasPermission) {
-            isNetworkAvailable = true
-            return
-        }
-
-        runCatching {
-            val cm = context.applicationContext.getSystemService(ConnectivityManager::class.java) ?: return
-            val activeCaps = cm.getNetworkCapabilities(cm.activeNetwork)
-            isNetworkAvailable = activeCaps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-
-            val cb = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    val wasOffline = !isNetworkAvailable
-                    isNetworkAvailable = true
-                    if (wasOffline) {
-                        addLog("Интернет восстановлен, продолжаю работу.")
-                        wakeSignal?.complete(Unit)
-                    }
-                }
-
-                override fun onLost(network: Network) {
-                    runCatching {
-                        val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-                        isNetworkAvailable = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-                        if (!isNetworkAvailable) {
-                            addLog("Интернет потерян, ожидание сети...")
-                        }
-                    }
-                }
-            }
-            cm.registerDefaultNetworkCallback(cb)
-            networkCallback = cb
-        }.onFailure {
-            isNetworkAvailable = true
-        }
-    }
-
-    fun unregisterNetworkCallback(context: Context) {
-        val cb = networkCallback ?: return
-        networkCallback = null
-        runCatching {
-            val cm = context.applicationContext.getSystemService(ConnectivityManager::class.java) ?: return
-            cm.unregisterNetworkCallback(cb)
-        }
-    }
-
     fun addLog(message: String) {
-        val line = "[${LocalTime.now().format(timeFormat)}] $message"
+        val line = "[${timeFormat.format(Date())}] $message"
         _state.update { cur ->
             val updated = (cur.logs + line).takeLast(150)
             cur.copy(logs = updated)
-        }
-    }
-
-    fun clearSessionState() {
-        stopMining()
-        channelCooldowns.clear()
-        _state.update { cur ->
-            cur.copy(
-                isRunning = false,
-                statusText = "Подготовка...",
-                activeChannelLogin = null,
-                activeChannelViewers = 0,
-                activeGameName = null,
-                activeCampaign = null,
-                activeDrop = null,
-                channels = emptyList(),
-                campaigns = emptyList(),
-                sessionExpired = false,
-                claimedSessionCount = 0,
-                lastCampaignsFetchMs = 0L,
-                logs = emptyList(),
-                isRefreshing = false
-            )
         }
     }
 
@@ -163,7 +76,7 @@ object MinerRepository {
         if (!_state.value.isRunning) return
         preferredChannelLogin = channelLogin
         addLog("Переключаюсь на канал $channelLogin...")
-        wakeSignal?.complete(Unit)
+        switchSignal?.complete(Unit)
     }
 
     fun refreshActiveChannels(context: Context, session: TwitchSession) {
@@ -175,8 +88,6 @@ object MinerRepository {
                 val streams = gql.fetchLiveStreamsForCampaign(camp)
                 _state.update { it.copy(channels = streams) }
                 addLog("Список каналов обновлён (${camp.gameName}): ${streams.size} онлайн.")
-            } catch (e: TwitchAuthExpiredException) {
-                handleAuthExpired(e.message)
             } catch (e: Exception) {
                 addLog("Ошибка обновления каналов: ${e.message}")
             }
@@ -302,8 +213,6 @@ object MinerRepository {
                 } else {
                     addLog("Twitch пока не подтвердил получение $benefitName.")
                 }
-            } catch (e: TwitchAuthExpiredException) {
-                handleAuthExpired(e.message)
             } catch (e: Exception) {
                 addLog("Ошибка при получении $benefitName: ${e.message}")
             }
@@ -326,8 +235,6 @@ object MinerRepository {
                     )
                 }
                 addLog("Загружено кампаний: ${campaigns.size} (активных с дропами: ${campaigns.count { c -> c.isActive && c.hasUnclaimedDrops }}).")
-            } catch (e: TwitchAuthExpiredException) {
-                handleAuthExpired(e.message)
             } catch (e: Exception) {
                 addLog("Ошибка загрузки кампаний: ${e.message}")
             } finally {
@@ -340,15 +247,8 @@ object MinerRepository {
         initPreferences(context)
         if (minerJob?.isActive == true) return
 
-        registerNetworkCallback(context)
         val deviceId = AuthStorage(context).getOrCreateDeviceId()
-        _state.update {
-            it.copy(
-                isRunning = true,
-                sessionExpired = false,
-                statusText = "Запуск майнера..."
-            )
-        }
+        _state.update { it.copy(isRunning = true, statusText = "Запуск майнера...") }
 
         minerJob = scope.launch {
             val gql = TwitchGqlClient(session, deviceId, ::addLog)
@@ -366,21 +266,9 @@ object MinerRepository {
                             it.channelLogin.equals(requestedLogin, ignoreCase = true)
                         }
                         if (curCamp != null && cachedStream != null && curCamp.isActive && curCamp.hasUnclaimedDrops) {
-                            val supported = gql.channelSupportsCampaign(cachedStream.channelId, curCamp.id)
-                            if (supported == false) {
-                                addLog("Канал $requestedLogin сейчас не раздаёт дропы этой кампании.")
-                                channelCooldowns[cachedStream.channelId] = System.currentTimeMillis() + 5 * 60_000L
-                            } else {
-                                mineStreamSession(gql, curCamp, cachedStream, isManualChannel = true)
-                                continue
-                            }
+                            mineStreamSession(gql, curCamp, cachedStream)
+                            continue
                         }
-                    }
-
-                    if (!isNetworkAvailable) {
-                        _state.update { it.copy(statusText = "Ожидание интернета...") }
-                        waitInterruptibly(60_000L)
-                        continue
                     }
 
                     val cacheAgeMs = System.currentTimeMillis() - _state.value.lastCampaignsFetchMs
@@ -397,12 +285,10 @@ object MinerRepository {
                             loaded
                         } catch (e: CancellationException) {
                             throw e
-                        } catch (e: TwitchAuthExpiredException) {
-                            throw e
                         } catch (e: Exception) {
                             addLog("Ошибка получения кампаний: ${e.message}. Повтор через 30с.")
                             _state.update { it.copy(statusText = "Ошибка сети, повтор...") }
-                            waitInterruptibly(30_000L)
+                            delay(30_000)
                             continue
                         }
                     }
@@ -424,7 +310,6 @@ object MinerRepository {
                             it.copy(
                                 statusText = "Нет подходящих активных кампаний",
                                 activeChannelLogin = null,
-                                activeChannelViewers = 0,
                                 activeGameName = null,
                                 activeCampaign = null,
                                 activeDrop = null,
@@ -432,7 +317,7 @@ object MinerRepository {
                             )
                         }
                         addLog("Нет доступных активных кампаний. Следующая проверка через 5 мин.")
-                        waitInterruptibly(5 * 60_000L)
+                        delay(5 * 60_000L)
                         continue
                     }
 
@@ -446,8 +331,6 @@ object MinerRepository {
                             gql.fetchLiveStreamsForCampaign(camp)
                         } catch (e: CancellationException) {
                             throw e
-                        } catch (e: TwitchAuthExpiredException) {
-                            throw e
                         } catch (e: Exception) {
                             addLog("Ошибка поиска каналов (${camp.gameName}): ${e.message}")
                             emptyList()
@@ -457,19 +340,11 @@ object MinerRepository {
                             foundStreams = streams
                         }
 
-                        val candidateStreams = streams
-                            .filter { (channelCooldowns[it.channelId] ?: 0L) <= now }
-                            .take(12)
+                        for (s in streams.take(12)) {
+                            val cooldownUntil = channelCooldowns[s.channelId] ?: 0L
+                            if (cooldownUntil > now) continue
 
-                        if (candidateStreams.isEmpty()) continue
-
-                        val supportMap = gql.checkChannelsSupportCampaignBatch(
-                            channelIds = candidateStreams.map { it.channelId },
-                            campaignId = camp.id
-                        )
-
-                        for (s in candidateStreams) {
-                            val supported = supportMap[s.channelId]
+                            val supported = gql.channelSupportsCampaign(s.channelId, camp.id)
                             if (supported != false) {
                                 selectedCampaign = camp
                                 selectedStream = s
@@ -489,31 +364,28 @@ object MinerRepository {
                             it.copy(
                                 statusText = "Нет стримов с дропами",
                                 activeChannelLogin = null,
-                                activeChannelViewers = 0,
                                 activeGameName = firstCamp.gameName,
                                 activeCampaign = firstCamp,
                                 activeDrop = firstCamp.nextDrop
                             )
                         }
                         addLog("Сейчас нет живых стримов с активными дропами. Пауза 2 мин.")
-                        waitInterruptibly(2 * 60_000L)
+                        delay(2 * 60_000L)
                         continue
                     }
 
-                    mineStreamSession(gql, selectedCampaign, selectedStream, isManualChannel = false)
+                    mineStreamSession(gql, selectedCampaign, selectedStream)
                 }
             } catch (_: CancellationException) {
                 addLog("Майнер остановлен.")
-            } catch (e: TwitchAuthExpiredException) {
-                handleAuthExpired(e.message)
             } catch (e: Exception) {
                 addLog("Критическая ошибка майнера: ${e.message}")
             } finally {
-                wakeSignal = null
-                _state.update { cur ->
-                    cur.copy(
+                switchSignal = null
+                _state.update {
+                    it.copy(
                         isRunning = false,
-                        statusText = if (cur.sessionExpired) "Сессия истекла — войдите снова" else "Остановлен",
+                        statusText = "Остановлен",
                         activeChannelLogin = null,
                         activeChannelViewers = 0
                     )
@@ -523,36 +395,19 @@ object MinerRepository {
     }
 
     fun stopMining() {
-        wakeSignal?.complete(Unit)
-        wakeSignal = null
+        switchSignal?.complete(Unit)
+        switchSignal = null
         preferredChannelLogin = null
         minerJob?.cancel()
         minerJob = null
-        _state.update { cur ->
-            cur.copy(
+        _state.update {
+            it.copy(
                 isRunning = false,
-                statusText = if (cur.sessionExpired) "Сессия истекла — войдите снова" else "Остановлен",
+                statusText = "Остановлен",
                 activeChannelLogin = null,
                 activeChannelViewers = 0
             )
         }
-    }
-
-    private fun handleAuthExpired(msg: String?) {
-        addLog("Авторизация истекла: ${msg ?: "требуется повторный вход"}")
-        _state.update {
-            it.copy(
-                sessionExpired = true,
-                statusText = "Сессия истекла — войдите снова"
-            )
-        }
-    }
-
-    private suspend fun waitInterruptibly(durationMs: Long) {
-        val signal = CompletableDeferred<Unit>()
-        wakeSignal = signal
-        withTimeoutOrNull(durationMs) { signal.await() }
-        if (wakeSignal === signal) wakeSignal = null
     }
 
     private fun syncDropProgressIntoState(
@@ -624,10 +479,6 @@ object MinerRepository {
                             recordClaimedDrop(drop.benefitName, camp.gameName)
                             claimedAny = true
                         }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: TwitchAuthExpiredException) {
-                        throw e
                     } catch (e: Exception) {
                         addLog("Не удалось забрать ${drop.benefitName}: ${e.message}")
                     }
@@ -713,16 +564,14 @@ object MinerRepository {
 
     private suspend fun mineStreamSession(
         gql: TwitchGqlClient,
-        initialCampaign: DropCampaignUi,
-        stream: LiveStreamCandidate,
-        isManualChannel: Boolean
+        campaign: DropCampaignUi,
+        stream: LiveStreamCandidate
     ) {
-        var campaign = initialCampaign
         addLog("Смотрим ${stream.channelLogin} (${campaign.gameName}, зрителей: ${stream.viewers})")
         var playlistUrl = gql.getLowestStreamPlaylistUrl(stream.channelLogin) ?: run {
             addLog("Не удалось получить поток ${stream.channelLogin}, ищу другой канал...")
             channelCooldowns[stream.channelId] = System.currentTimeMillis() + 5 * 60_000L
-            waitInterruptibly(5_000)
+            delay(10_000)
             return
         }
 
@@ -741,23 +590,16 @@ object MinerRepository {
         val seenChunks = mutableSetOf<String>()
         var tick = 0
         var loggedChunksOnce = false
-        var consecutiveHeartbeatFails = 0
         var lastMinutes = currentDrop?.currentMinutes ?: 0
         var lastProgressChangeMs = System.currentTimeMillis()
-        var sessionCheckStartMs = System.currentTimeMillis()
+        val sessionStartMs = System.currentTimeMillis()
 
-        while (true) {
+        while (System.currentTimeMillis() - sessionStartMs < 20 * 60_000L) {
             if (!preferredChannelLogin.isNullOrBlank()) return
 
-            if (!isNetworkAvailable) {
-                _state.update { it.copy(statusText = "Ожидание интернета...") }
-                waitInterruptibly(15_000L)
-                continue
-            }
-
             val chunksSent = gql.sendWatchHeartbeat(playlistUrl, seenChunks)
-            if (chunksSent == -2) {
-                addLog("Плейлист ${stream.channelLogin} истёк, обновляю поток...")
+            if (chunksSent <= 0) {
+                addLog("Поток ${stream.channelLogin} прервался, переподключение...")
                 val refreshed = gql.getLowestStreamPlaylistUrl(stream.channelLogin)
                 if (refreshed.isNullOrBlank()) {
                     addLog("Канал ${stream.channelLogin} оффлайн. Смена канала.")
@@ -765,33 +607,10 @@ object MinerRepository {
                 }
                 playlistUrl = refreshed
                 seenChunks.clear()
-                consecutiveHeartbeatFails = 0
                 loggedChunksOnce = false
-            } else if (chunksSent <= 0) {
-                consecutiveHeartbeatFails++
-                if (consecutiveHeartbeatFails >= 2) {
-                    addLog("Поток ${stream.channelLogin} прервался, переподключение...")
-                    val refreshed = gql.getLowestStreamPlaylistUrl(stream.channelLogin)
-                    if (refreshed.isNullOrBlank()) {
-                        addLog("Канал ${stream.channelLogin} оффлайн. Смена канала.")
-                        return
-                    }
-                    playlistUrl = refreshed
-                    seenChunks.clear()
-                    consecutiveHeartbeatFails = 0
-                    loggedChunksOnce = false
-                }
-            } else {
-                consecutiveHeartbeatFails = 0
-                _state.update {
-                    if (it.statusText != "Майнинг: ${stream.channelLogin}") {
-                        it.copy(statusText = "Майнинг: ${stream.channelLogin}")
-                    } else it
-                }
-                if (!loggedChunksOnce) {
-                    addLog("Просмотр подтверждён (HEAD x$chunksSent чанков).")
-                    loggedChunksOnce = true
-                }
+            } else if (!loggedChunksOnce) {
+                addLog("Просмотр подтверждён (HEAD x$chunksSent чанков).")
+                loggedChunksOnce = true
             }
 
             tick++
@@ -833,15 +652,6 @@ object MinerRepository {
                 }
             }
 
-            if (tick % 4 == 0) {
-                val stillSupported = gql.channelSupportsCampaign(stream.channelId, campaign.id)
-                if (stillSupported == false) {
-                    addLog("Канал ${stream.channelLogin} больше не раздаёт дропы этой кампании — меняю канал.")
-                    channelCooldowns[stream.channelId] = System.currentTimeMillis() + 5 * 60_000L
-                    return
-                }
-            }
-
             val dropForInv = currentDrop
             if (tick % 6 == 0 && dropForInv != null) {
                 val invSnap = gql.fetchDropProgressFromInventory(campaign.id, dropForInv.id)
@@ -880,37 +690,10 @@ object MinerRepository {
                 return
             }
 
-            if (System.currentTimeMillis() - sessionCheckStartMs >= 20 * 60_000L) {
-                sessionCheckStartMs = System.currentTimeMillis()
-                val refreshed = runCatching { gql.fetchCampaigns() }.getOrElse { err ->
-                    if (err is CancellationException || err is TwitchAuthExpiredException) throw err
-                    null
-                }
-                if (refreshed != null) {
-                    _state.update {
-                        it.copy(campaigns = refreshed, lastCampaignsFetchMs = System.currentTimeMillis())
-                    }
-                    if (claimReadyDrops(gql, refreshed)) {
-                        return
-                    }
-                    val updatedCamp = refreshed.firstOrNull { it.id == campaign.id }
-                    if (updatedCamp == null || !updatedCamp.isActive || !updatedCamp.hasUnclaimedDrops) {
-                        addLog("Текущая кампания завершена, ищу следующую.")
-                        return
-                    }
-                    if (!isManualChannel) {
-                        val best = orderEligibleCampaigns(refreshed).firstOrNull()
-                        if (best != null && best.id != campaign.id) {
-                            addLog("Появилась более приоритетная кампания: ${best.gameName}")
-                            return
-                        }
-                    }
-                    campaign = updatedCamp
-                    _state.update { it.copy(activeCampaign = updatedCamp) }
-                }
-            }
-
-            waitInterruptibly(20_000L)
+            val signal = CompletableDeferred<Unit>()
+            switchSignal = signal
+            withTimeoutOrNull(20_000) { signal.await() }
+            if (switchSignal === signal) switchSignal = null
         }
     }
 }
