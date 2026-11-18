@@ -187,7 +187,9 @@ fun AppRoot() {
         AuthUiState.Checking, AuthUiState.Validating -> {
             Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 Column(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .safeDrawingPadding(),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -283,6 +285,7 @@ private fun LoginWelcomeView(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .safeDrawingPadding()
                 .padding(20.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
@@ -398,7 +401,11 @@ private fun MinerDashboard(
         containerColor = Color(0xFF0E0E10),
         topBar = {
             Surface(color = Color(0xFF18181B)) {
-                Column(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
