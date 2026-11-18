@@ -81,6 +81,18 @@ class MinerForegroundService : Service() {
                             buildClaimedNotification(uiState.lastClaimedTitle, uiState.lastClaimedBody)
                         )
                     }
+                    if (uiState.sessionExpired) {
+                        nm.notify(
+                            AUTH_EXPIRED_NOTIF_ID,
+                            buildClaimedNotification(
+                                "Сессия Twitch истекла",
+                                "Откройте приложение и войдите в аккаунт снова."
+                            )
+                        )
+                        releaseWakeLock()
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
                 }
             }
         }
@@ -88,9 +100,18 @@ class MinerForegroundService : Service() {
         return START_STICKY
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        MinerRepository.addLog("Достигнут суточный лимит фоновой службы Android 15 (6 ч), майнер остановлен.")
+        MinerRepository.stopMining()
+        releaseWakeLock()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
     override fun onDestroy() {
         stateObserveJob?.cancel()
         MinerRepository.stopMining()
+        MinerRepository.unregisterNetworkCallback(applicationContext)
         releaseWakeLock()
         serviceScope.cancel()
         super.onDestroy()
@@ -212,5 +233,6 @@ class MinerForegroundService : Service() {
         private const val CLAIM_CHANNEL_ID = "tdm_claimed_channel"
         private const val NOTIFICATION_ID = 1001
         private const val CLAIM_NOTIF_BASE_ID = 2000
+        private const val AUTH_EXPIRED_NOTIF_ID = 2999
     }
 }
