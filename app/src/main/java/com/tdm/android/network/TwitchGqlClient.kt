@@ -99,12 +99,7 @@ class TwitchGqlClient(
                 GqlRegistry.syncFromDevilXd(client, force = true, log = log)
                 return@withContext gqlSingle(key, variables, allowRetry = false)
             }
-            if (allowRetry && messages.any {
-                    it.contains("service error", ignoreCase = true) ||
-                        it.contains("timeout", ignoreCase = true) ||
-                        it.contains("deadline", ignoreCase = true)
-                }
-            ) {
+            if (allowRetry) {
                 delay(1500)
                 return@withContext gqlSingle(key, variables, allowRetry = false)
             }
@@ -215,11 +210,27 @@ class TwitchGqlClient(
             }
         }
 
-        val campResp = gqlSingle("Campaigns")
-        val rawCampaigns = campResp["data"].asObj()
+        var campResp = gqlSingle("Campaigns")
+        var rawCampaigns = campResp["data"].asObj()
             ?.get("currentUser").asObj()
             ?.get("dropCampaigns").asArr()
-            .orEmpty()
+
+        if (rawCampaigns == null) {
+            delay(1500)
+            campResp = gqlSingle("Campaigns", allowRetry = false)
+            rawCampaigns = campResp["data"].asObj()
+                ?.get("currentUser").asObj()
+                ?.get("dropCampaigns").asArr()
+        }
+
+        if (rawCampaigns == null) {
+            val errMessages = campResp["errors"].asArr()
+                ?.mapNotNull { it.asObj()?.get("message").asStr() }
+                ?.joinToString()
+                .orEmpty()
+            val detail = if (errMessages.isNotBlank()) errMessages else "пустой ответ dropCampaigns"
+            throw IllegalStateException("Twitch не вернул кампании: $detail")
+        }
 
         val baseList = rawCampaigns.mapNotNull { it.asObj() }.filter { obj ->
             val st = obj["status"].asStr().orEmpty()
@@ -482,14 +493,13 @@ class TwitchGqlClient(
                 }
                 val respList = gqlBatch(batch)
                 chunk.forEachIndexed { idx, chId ->
-                    val channelObj = respList.getOrNull(idx)
-                        ?.get("data").asObj()
-                        ?.get("channel").asObj()
+                    val item = respList.getOrNull(idx)
+                    val channelObj = item?.get("data").asObj()?.get("channel").asObj()
                     val campaigns = channelObj?.get("viewerDropCampaigns").asArr()
-                    result[chId] = if (channelObj == null) {
+                    result[chId] = if (channelObj == null || campaigns == null) {
                         null
                     } else {
-                        campaigns?.any { it.asObj()?.get("id").asStr() == campaignId } == true
+                        campaigns.any { it.asObj()?.get("id").asStr() == campaignId }
                     }
                 }
             } catch (e: CancellationException) {
@@ -507,7 +517,7 @@ class TwitchGqlClient(
         return try {
             val resp = gqlSingle("AvailableDrops", buildJsonObject { put("channelID", channelId) })
             val channelObj = resp["data"].asObj()?.get("channel").asObj() ?: return null
-            val campaigns = channelObj["viewerDropCampaigns"].asArr() ?: return false
+            val campaigns = channelObj["viewerDropCampaigns"].asArr() ?: return null
             campaigns.any { it.asObj()?.get("id").asStr() == campaignId }
         } catch (e: CancellationException) {
             throw e
@@ -577,7 +587,7 @@ class TwitchGqlClient(
             val variants = parseMasterPlaylistVariants(body)
             val videoVariants = variants.filter { !it.isAudioOnly }
             val chosen = videoVariants.minByOrNull { it.bandwidth }
-                ?: variants.minByOrNull { it.bandwidth }
+                ?: variants.lastOrNull()
             chosen?.url
         }
     }
@@ -664,9 +674,9 @@ class TwitchGqlClient(
 
             val fresh = chunks.filter { it !in seenChunks }
             val toSend = if (seenChunks.isEmpty()) {
-                chunks.takeLast(1)
+                chunks.takeLast(3)
             } else if (fresh.isNotEmpty()) {
-                fresh.takeLast(2)
+                fresh.takeLast(8)
             } else {
                 listOf(chunks.last())
             }
