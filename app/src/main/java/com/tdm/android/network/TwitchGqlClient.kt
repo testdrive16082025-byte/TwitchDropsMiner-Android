@@ -1,11 +1,11 @@
 package com.tdm.android.network
 
 import com.tdm.android.data.AllowedChannel
-import com.tdm.android.data.DropBenefitUi
 import com.tdm.android.data.DropCampaignUi
 import com.tdm.android.data.LiveStreamCandidate
 import com.tdm.android.data.TimedDropUi
 import com.tdm.android.data.TwitchSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -26,6 +26,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import java.time.Instant
 
+class TwitchAuthExpiredException(message: String) : Exception(message)
+
 data class CurrentDropProgress(
     val dropId: String,
     val currentMinutes: Int,
@@ -41,6 +43,12 @@ data class DropProgressSnapshot(
 private data class ClaimedBenefitEntry(
     val benefitId: String,
     val lastAwardedAtMs: Long
+)
+
+private data class HlsVariant(
+    val url: String,
+    val bandwidth: Long,
+    val isAudioOnly: Boolean
 )
 
 class TwitchGqlClient(
@@ -83,6 +91,9 @@ class TwitchGqlClient(
         val errors = respObj["errors"].asArr()
         if (!errors.isNullOrEmpty()) {
             val messages = errors.mapNotNull { it.asObj()?.get("message").asStr() }
+            if (messages.any { isAuthErrorMessage(it) }) {
+                throw TwitchAuthExpiredException("Токен Twitch недействителен или истёк")
+            }
             if (allowRetry && messages.any { it.contains("PersistedQueryNotFound", ignoreCase = true) }) {
                 log("GQL $key: PersistedQueryNotFound — обновляю хеши с GitHub DevilXD...")
                 GqlRegistry.syncFromDevilXd(client, force = true, log = log)
@@ -116,6 +127,16 @@ class TwitchGqlClient(
         val respArr = executeRawGql(arrayPayload).asArr()
             ?: return@withContext emptyList()
 
+        val hasAuthError = respArr.any { elem ->
+            elem.asObj()?.get("errors").asArr()?.any { err ->
+                val msg = err.asObj()?.get("message").asStr().orEmpty()
+                isAuthErrorMessage(msg)
+            } == true
+        }
+        if (hasAuthError) {
+            throw TwitchAuthExpiredException("Токен Twitch недействителен или истёк")
+        }
+
         val hasNotFound = respArr.any { elem ->
             elem.asObj()?.get("errors").asArr()?.any { err ->
                 err.asObj()?.get("message").asStr()?.contains("PersistedQueryNotFound", ignoreCase = true) == true
@@ -128,6 +149,12 @@ class TwitchGqlClient(
         }
 
         respArr.mapNotNull { it.asObj() }
+    }
+
+    private fun isAuthErrorMessage(message: String): Boolean {
+        return message.contains("invalid oauth", ignoreCase = true) ||
+            message.contains("unauthorized", ignoreCase = true) ||
+            message.contains("unauthenticated", ignoreCase = true)
     }
 
     private fun executeRawGql(jsonBody: String): JsonElement {
@@ -143,7 +170,13 @@ class TwitchGqlClient(
 
         client.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
+            if (response.code == 401) {
+                throw TwitchAuthExpiredException("Сессия Twitch истекла (HTTP 401)")
+            }
             if (!response.isSuccessful) {
+                if (isAuthErrorMessage(body)) {
+                    throw TwitchAuthExpiredException("Сессия Twitch недействительна (HTTP ${response.code})")
+                }
                 throw IllegalStateException("HTTP ${response.code} от GQL: ${body.take(180)}")
             }
             return json.parseToJsonElement(body)
@@ -155,16 +188,11 @@ class TwitchGqlClient(
         val inventoryObj = invResp["data"].asObj()?.get("currentUser").asObj()?.get("inventory").asObj()
 
         val progressMap = mutableMapOf<String, MutableMap<String, DropProgressSnapshot>>()
-        val inProgressDropsFallback = mutableMapOf<String, JsonArray>()
         inventoryObj?.get("dropCampaignsInProgress").asArr()?.forEach { campEl ->
             val campObj = campEl.asObj() ?: return@forEach
             val campId = campObj["id"].asStr() ?: return@forEach
-            val dropsArr = campObj["timeBasedDrops"].asArr()
-            if (dropsArr != null) {
-                inProgressDropsFallback[campId] = dropsArr
-            }
             val map = progressMap.getOrPut(campId) { mutableMapOf() }
-            dropsArr?.forEach { dropEl ->
+            campObj["timeBasedDrops"].asArr()?.forEach { dropEl ->
                 val dropObj = dropEl.asObj() ?: return@forEach
                 val dropId = dropObj["id"].asStr() ?: return@forEach
                 val selfObj = dropObj["self"].asObj()
@@ -199,7 +227,7 @@ class TwitchGqlClient(
         }
 
         val detailsById = mutableMapOf<String, JsonObject>()
-        val chunks = baseList.mapNotNull { it["id"].asStr() }.chunked(8)
+        val chunks = baseList.mapNotNull { it["id"].asStr() }.chunked(15)
         for (chunkIds in chunks) {
             val batchReq = chunkIds.map { cid ->
                 "CampaignDetails" to buildJsonObject {
@@ -207,7 +235,7 @@ class TwitchGqlClient(
                     put("dropID", cid)
                 }
             }
-            val batchResp = runCatching { gqlBatch(batchReq) }.getOrDefault(emptyList())
+            val batchResp = gqlBatch(batchReq)
             for (respObj in batchResp) {
                 val cObj = respObj["data"].asObj()?.get("user").asObj()?.get("dropCampaign").asObj()
                     ?: continue
@@ -238,13 +266,7 @@ class TwitchGqlClient(
             }
 
             val campProgress = progressMap[id].orEmpty()
-            val detailDrops = detail?.get("timeBasedDrops").asArr()
-            val dropsArr = if (!detailDrops.isNullOrEmpty()) {
-                detailDrops
-            } else {
-                inProgressDropsFallback[id] ?: JsonArray(emptyList())
-            }
-
+            val dropsArr = detail?.get("timeBasedDrops").asArr().orEmpty()
             val drops = dropsArr.mapNotNull { dEl ->
                 val dObj = dEl.asObj() ?: return@mapNotNull null
                 val dropId = dObj["id"].asStr() ?: return@mapNotNull null
@@ -252,32 +274,18 @@ class TwitchGqlClient(
                 val reqMin = dObj["requiredMinutesWatched"].asInt() ?: 0
                 val prog = campProgress[dropId]
 
-                val benefits = dObj["benefitEdges"].asArr().orEmpty().mapNotNull { edgeEl ->
-                    val bObj = edgeEl.asObj()?.get("benefit").asObj() ?: return@mapNotNull null
-                    val bId = bObj["id"].asStr().orEmpty()
-                    val bName = bObj["name"].asStr() ?: return@mapNotNull null
-                    val bImg = bObj["imageAssetURL"].asStr()
-                    DropBenefitUi(bId, bName, bImg)
-                }
-
-                val firstBenefit = benefits.firstOrNull()
-                val benefitId = firstBenefit?.id.orEmpty()
-                val joinedName = if (benefits.isNotEmpty()) {
-                    benefits.joinToString(", ") { it.name }
-                } else {
-                    dropName
-                }
-                val benefitImage = firstBenefit?.imageUrl
+                val firstBenefit = dObj["benefitEdges"].asArr()?.firstOrNull()
+                    ?.asObj()?.get("benefit").asObj()
+                val benefitId = firstBenefit?.get("id").asStr().orEmpty()
+                val benefitName = firstBenefit?.get("name").asStr() ?: dropName
+                val benefitImage = firstBenefit?.get("imageAssetURL").asStr()
 
                 val dropStartMs = parseIsoTime(dObj["startAt"].asStr())
                 val dropEndMs = parseIsoTime(dObj["endAt"].asStr())
-                val matchedInInventory = dropStartMs > 0L &&
+                val matchedInInventory = benefitId.isNotBlank() &&
+                    dropStartMs > 0L &&
                     dropEndMs > 0L &&
-                    benefits.any { b ->
-                        b.id.isNotBlank() && claimedBenefits.any {
-                            it.benefitId == b.id && it.lastAwardedAtMs in dropStartMs..dropEndMs
-                        }
-                    }
+                    claimedBenefits.any { it.benefitId == benefitId && it.lastAwardedAtMs in dropStartMs..dropEndMs }
 
                 val curMin = prog?.currentMinutes ?: 0
                 val claimed = (prog?.isClaimed ?: false) || matchedInInventory
@@ -287,11 +295,8 @@ class TwitchGqlClient(
                     id = dropId,
                     name = dropName,
                     benefitId = benefitId,
-                    benefitName = joinedName,
+                    benefitName = benefitName,
                     imageUrl = benefitImage,
-                    benefits = benefits.ifEmpty {
-                        listOf(DropBenefitUi(benefitId, dropName, benefitImage))
-                    },
                     requiredMinutes = reqMin,
                     currentMinutes = if (claimed && reqMin > 0) maxOf(curMin, reqMin) else curMin,
                     isClaimed = claimed,
@@ -370,6 +375,10 @@ class TwitchGqlClient(
                 }
             }
             null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: TwitchAuthExpiredException) {
+            throw e
         } catch (_: Exception) {
             null
         }
@@ -460,14 +469,50 @@ class TwitchGqlClient(
         }
     }
 
+    suspend fun checkChannelsSupportCampaignBatch(
+        channelIds: List<String>,
+        campaignId: String
+    ): Map<String, Boolean?> {
+        if (channelIds.isEmpty()) return emptyMap()
+        val result = mutableMapOf<String, Boolean?>()
+        for (chunk in channelIds.chunked(15)) {
+            try {
+                val batch = chunk.map { chId ->
+                    "AvailableDrops" to buildJsonObject { put("channelID", chId) }
+                }
+                val respList = gqlBatch(batch)
+                chunk.forEachIndexed { idx, chId ->
+                    val channelObj = respList.getOrNull(idx)
+                        ?.get("data").asObj()
+                        ?.get("channel").asObj()
+                    val campaigns = channelObj?.get("viewerDropCampaigns").asArr()
+                    result[chId] = if (channelObj == null) {
+                        null
+                    } else {
+                        campaigns?.any { it.asObj()?.get("id").asStr() == campaignId } == true
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: TwitchAuthExpiredException) {
+                throw e
+            } catch (_: Exception) {
+                chunk.forEach { result[it] = null }
+            }
+        }
+        return result
+    }
+
     suspend fun channelSupportsCampaign(channelId: String, campaignId: String): Boolean? {
         return try {
             val resp = gqlSingle("AvailableDrops", buildJsonObject { put("channelID", channelId) })
-            val campaigns = resp["data"].asObj()
-                ?.get("channel").asObj()
-                ?.get("viewerDropCampaigns").asArr()
-                ?: return false
+            val channelObj = resp["data"].asObj()?.get("channel").asObj() ?: return null
+            val campaigns = channelObj["viewerDropCampaigns"].asArr() ?: return false
             campaigns.any { it.asObj()?.get("id").asStr() == campaignId }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: TwitchAuthExpiredException) {
+            throw e
         } catch (_: Exception) {
             null
         }
@@ -485,6 +530,10 @@ class TwitchGqlClient(
                 currentMinutes = cur["currentMinutesWatched"].asInt() ?: 0,
                 requiredMinutes = cur["requiredMinutesWatched"].asInt() ?: 0
             )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: TwitchAuthExpiredException) {
+            throw e
         } catch (_: Exception) {
             null
         }
@@ -493,7 +542,8 @@ class TwitchGqlClient(
     suspend fun getLowestStreamPlaylistUrl(channelLogin: String): String? = withContext(Dispatchers.IO) {
         val tokenResp = runCatching {
             gqlSingle("PlaybackAccessToken", buildJsonObject { put("login", channelLogin) })
-        }.getOrElse {
+        }.getOrElse { err ->
+            if (err is CancellationException || err is TwitchAuthExpiredException) throw err
             executeRawPlaybackTokenFallback(channelLogin)
         }
 
@@ -523,12 +573,35 @@ class TwitchGqlClient(
                 log("Поток $channelLogin недоступен: ${body.take(120)}")
                 return@withContext null
             }
-            val variantUrls = body.lineSequence()
-                .map { it.trim() }
-                .filter { it.startsWith("http") }
-                .toList()
-            variantUrls.lastOrNull()
+
+            val variants = parseMasterPlaylistVariants(body)
+            val videoVariants = variants.filter { !it.isAudioOnly }
+            val chosen = videoVariants.minByOrNull { it.bandwidth }
+                ?: variants.minByOrNull { it.bandwidth }
+            chosen?.url
         }
+    }
+
+    private fun parseMasterPlaylistVariants(masterBody: String): List<HlsVariant> {
+        val variants = mutableListOf<HlsVariant>()
+        val bwRegex = Regex("""BANDWIDTH=(\d+)""")
+        var lastStreamInf: String? = null
+
+        for (rawLine in masterBody.lineSequence()) {
+            val line = rawLine.trim()
+            if (line.isEmpty()) continue
+            if (line.startsWith("#EXT-X-STREAM-INF")) {
+                lastStreamInf = line
+            } else if (line.startsWith("http")) {
+                val inf = lastStreamInf.orEmpty()
+                val bw = bwRegex.find(inf)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: Long.MAX_VALUE
+                val isAudioOnly = inf.contains("audio_only", ignoreCase = true) ||
+                    (inf.contains("CODECS=", ignoreCase = true) && !inf.contains("RESOLUTION=", ignoreCase = true) && !inf.contains("avc", ignoreCase = true) && !inf.contains("hev", ignoreCase = true))
+                variants.add(HlsVariant(url = line, bandwidth = bw, isAudioOnly = isAudioOnly))
+                lastStreamInf = null
+            }
+        }
+        return variants
     }
 
     private fun executeRawPlaybackTokenFallback(channelLogin: String): JsonObject {
@@ -556,6 +629,12 @@ class TwitchGqlClient(
         return executeRawGql(rawPayload).asObj() ?: buildJsonObject {}
     }
 
+    /**
+     * Возвращает:
+     * > 0  — количество успешно подтверждённых чанков
+     * -1   — временная ошибка сети / чанка
+     * -2   — плейлист истёк или канал оффлайн (403/404/410)
+     */
     suspend fun sendWatchHeartbeat(playlistUrl: String, seenChunks: MutableSet<String>): Int = withContext(Dispatchers.IO) {
         try {
             val listReq = Request.Builder()
@@ -565,27 +644,34 @@ class TwitchGqlClient(
                 .build()
 
             val chunks = client.newCall(listReq).execute().use { resp ->
+                if (resp.code == 403 || resp.code == 404 || resp.code == 410) {
+                    return@withContext -2
+                }
                 if (resp.code >= 400) return@withContext -1
+                val basePrefix = playlistUrl.substringBeforeLast('/')
                 val text = resp.body?.string().orEmpty()
                 text.lineSequence()
                     .map { it.trim() }
                     .filter { it.isNotEmpty() && !it.startsWith("#") }
                     .map { line ->
                         if (line.startsWith("http")) line
-                        else playlistUrl.substringBeforeLast('/') + "/" + line
+                        else "$basePrefix/$line"
                     }
                     .toList()
             }
 
             if (chunks.isEmpty()) return@withContext -1
 
+            val fresh = chunks.filter { it !in seenChunks }
             val toSend = if (seenChunks.isEmpty()) {
-                chunks.takeLast(3)
+                chunks.takeLast(1)
+            } else if (fresh.isNotEmpty()) {
+                fresh.takeLast(2)
             } else {
-                val fresh = chunks.filter { it !in seenChunks }
-                if (fresh.isNotEmpty()) fresh else listOf(chunks.last())
+                listOf(chunks.last())
             }
 
+            var successCount = 0
             for (chunkUrl in toSend) {
                 val headReq = Request.Builder()
                     .url(chunkUrl)
@@ -593,16 +679,22 @@ class TwitchGqlClient(
                     .head()
                     .build()
 
-                client.newCall(headReq).execute().use { headResp ->
-                    if (headResp.code != 200) {
-                        return@withContext -1
+                runCatching {
+                    client.newCall(headReq).execute().use { headResp ->
+                        if (headResp.code in 200..299) {
+                            successCount++
+                        }
                     }
                 }
             }
 
+            if (successCount <= 0) return@withContext -1
+
             if (seenChunks.size > 200) seenChunks.clear()
             seenChunks.addAll(chunks)
-            toSend.size
+            successCount
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             -1
         }
