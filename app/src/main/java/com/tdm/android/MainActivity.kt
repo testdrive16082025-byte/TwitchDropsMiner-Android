@@ -12,6 +12,7 @@ import android.webkit.CookieManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -32,15 +33,20 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
@@ -58,9 +64,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import coil.compose.AsyncImage
 import com.tdm.android.data.AuthStorage
-import com.tdm.android.data.DropBenefitUi
+import com.tdm.android.data.CampaignFilter
 import com.tdm.android.data.DropCampaignUi
 import com.tdm.android.data.LiveStreamCandidate
 import com.tdm.android.data.MinerUiState
@@ -79,6 +88,7 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         MinerRepository.initPreferences(applicationContext)
         setContent {
             TwitchMinerTheme {
@@ -110,12 +120,6 @@ private sealed interface AuthUiState {
     data class LoggedIn(val session: TwitchSession) : AuthUiState
 }
 
-private enum class CampaignFilter(val label: String) {
-    ALL("Все"),
-    ACTIVE("Активные"),
-    COMPLETED("Выполнены")
-}
-
 private fun formatMinutesAsClock(totalMinutes: Int): String {
     val safe = totalMinutes.coerceAtLeast(0)
     val h = safe / 60
@@ -137,6 +141,20 @@ fun AppRoot() {
     var uiState by remember { mutableStateOf<AuthUiState>(AuthUiState.Checking) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var showManualDialog by remember { mutableStateOf(false) }
+
+    fun performLogout(reason: String?) {
+        context.startService(
+            Intent(context, MinerForegroundService::class.java).apply {
+                action = MinerForegroundService.ACTION_STOP
+            }
+        )
+        MinerRepository.clearSessionState()
+        authStorage.clearSession()
+        CookieManager.getInstance().removeAllCookies(null)
+        CookieManager.getInstance().flush()
+        errorMessage = reason
+        uiState = AuthUiState.LoggedOut
+    }
 
     fun verifyAndSaveToken(token: String) {
         scope.launch {
@@ -190,7 +208,9 @@ fun AppRoot() {
         AuthUiState.Checking, AuthUiState.Validating -> {
             Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 Column(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .safeDrawingPadding(),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -218,18 +238,8 @@ fun AppRoot() {
         is AuthUiState.LoggedIn -> {
             MinerDashboard(
                 session = state.session,
-                onLogout = {
-                    context.startService(
-                        Intent(context, MinerForegroundService::class.java).apply {
-                            action = MinerForegroundService.ACTION_STOP
-                        }
-                    )
-                    authStorage.clearSession()
-                    CookieManager.getInstance().removeAllCookies(null)
-                    CookieManager.getInstance().flush()
-                    errorMessage = null
-                    uiState = AuthUiState.LoggedOut
-                }
+                onLogout = { performLogout(null) },
+                onSessionExpired = { performLogout("Сессия Twitch истекла, войдите снова.") }
             )
         }
 
@@ -286,6 +296,7 @@ private fun LoginWelcomeView(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .safeDrawingPadding()
                 .padding(20.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
@@ -362,22 +373,59 @@ private fun LoginWelcomeView(
 @Composable
 private fun MinerDashboard(
     session: TwitchSession,
-    onLogout: () -> Unit
+    onLogout: () -> Unit,
+    onSessionExpired: () -> Unit
 ) {
     val context = LocalContext.current
     val minerState by MinerRepository.state.collectAsState()
     var selectedTab by remember { mutableIntStateOf(0) }
     var showSettingsDialog by remember { mutableStateOf(false) }
 
+    fun checkBatteryOpt(): Boolean {
+        val pm = context.getSystemService(PowerManager::class.java)
+        return pm != null && !pm.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    var isBatteryOptimized by remember { mutableStateOf(checkBatteryOpt()) }
+
+    val lifecycleOwner = context as? LifecycleOwner
+    DisposableEffect(lifecycleOwner) {
+        if (lifecycleOwner == null) return@DisposableEffect onDispose {}
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isBatteryOptimized = checkBatteryOpt()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(minerState.sessionExpired) {
+        if (minerState.sessionExpired) {
+            onSessionExpired()
+        }
+    }
+
     val notifLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { }
 
-    val isBatteryOptimized = remember(minerState.isRunning, showSettingsDialog) {
-        val pm = context.getSystemService(PowerManager::class.java)
-        pm != null && !pm.isIgnoringBatteryOptimizations(context.packageName)
+    fun startMinerService() {
+        val intent = Intent(context, MinerForegroundService::class.java).apply {
+            action = MinerForegroundService.ACTION_START
+        }
+        ContextCompat.startForegroundService(context, intent)
     }
 
+    fun stopMinerService() {
+        context.startService(
+            Intent(context, MinerForegroundService::class.java).apply {
+                action = MinerForegroundService.ACTION_STOP
+            }
+        )
+    }
+
+    // Автоматический запуск майнера при входе в приложение
     LaunchedEffect(session.userId) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
@@ -389,10 +437,7 @@ private fun MinerDashboard(
             }
         }
         if (!MinerRepository.state.value.isRunning) {
-            val intent = Intent(context, MinerForegroundService::class.java).apply {
-                action = MinerForegroundService.ACTION_START
-            }
-            ContextCompat.startForegroundService(context, intent)
+            startMinerService()
         }
     }
 
@@ -400,7 +445,11 @@ private fun MinerDashboard(
         containerColor = Color(0xFF0E0E10),
         topBar = {
             Surface(color = Color(0xFF18181B)) {
-                Column(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -432,9 +481,6 @@ private fun MinerDashboard(
                             }
                             IconButton(onClick = { showSettingsDialog = true }) {
                                 Icon(Icons.Default.Settings, contentDescription = "Настройки", tint = Color(0xFFEFEFF1))
-                            }
-                            IconButton(onClick = onLogout) {
-                                Icon(Icons.Default.PowerSettingsNew, contentDescription = "Выйти", tint = Color(0xFFFF8A9B))
                             }
                         }
                     }
@@ -483,6 +529,8 @@ private fun MinerDashboard(
                 0 -> MainPcStyleTab(
                     minerState = minerState,
                     isBatteryOptimized = isBatteryOptimized,
+                    onStartMining = { startMinerService() },
+                    onStopMining = { stopMinerService() },
                     onDisableBatteryOpt = {
                         val intent = Intent(
                             Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -496,7 +544,9 @@ private fun MinerDashboard(
                     campaigns = minerState.campaigns,
                     priorityGames = minerState.priorityGames,
                     excludedGames = minerState.excludedGames,
+                    selectedFilter = minerState.lastDropsFilter,
                     isRefreshing = minerState.isRefreshing,
+                    onSelectFilter = { MinerRepository.setLastDropsFilter(it) },
                     onTogglePriority = { MinerRepository.togglePriorityGame(it) },
                     onToggleExclude = { MinerRepository.toggleExcludedGame(it) },
                     onManualClaim = { instanceId, benefitName, gameName ->
@@ -543,6 +593,10 @@ private fun MinerDashboard(
                     Uri.parse("package:${context.packageName}")
                 )
                 runCatching { context.startActivity(intent) }
+            },
+            onLogout = {
+                showSettingsDialog = false
+                onLogout()
             }
         )
     }
@@ -552,6 +606,8 @@ private fun MinerDashboard(
 private fun MainPcStyleTab(
     minerState: MinerUiState,
     isBatteryOptimized: Boolean,
+    onStartMining: () -> Unit,
+    onStopMining: () -> Unit,
     onDisableBatteryOpt: () -> Unit
 ) {
     Column(
@@ -592,16 +648,33 @@ private fun MainPcStyleTab(
                             )
                         }
                     }
-                    Surface(
-                        color = Color(0xFF25252D),
-                        shape = RoundedCornerShape(8.dp)
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text(
-                            text = minerState.priorityMode.title,
-                            fontSize = 11.sp,
-                            color = Color(0xFFBF94FF),
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
+                        Surface(
+                            color = Color(0xFF25252D),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = minerState.priorityMode.title,
+                                fontSize = 11.sp,
+                                color = Color(0xFFBF94FF),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = if (minerState.isRunning) onStopMining else onStartMining,
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (minerState.isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                contentDescription = if (minerState.isRunning) "Остановить" else "Запустить",
+                                tint = if (minerState.isRunning) Color(0xFFFF8A9B) else Color(0xFF00E676)
+                            )
+                        }
                     }
                 }
 
@@ -769,11 +842,20 @@ private fun MainPcStyleTab(
                         verticalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
                         items(minerState.logs.asReversed()) { line ->
+                            val lineColor = when {
+                                line.contains("ЗАБРАН ДРОП", ignoreCase = true) -> Color(0xFF00E676)
+                                line.contains("ошибка", ignoreCase = true) ||
+                                    line.contains("истекла", ignoreCase = true) -> Color(0xFFFF8A9B)
+                                line.contains("меняю", ignoreCase = true) ||
+                                    line.contains("переключаюсь", ignoreCase = true) ||
+                                    line.contains("прервался", ignoreCase = true) -> Color(0xFFFFCA28)
+                                else -> Color(0xFFD4D4D8)
+                            }
                             Text(
                                 text = line,
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace,
-                                color = Color(0xFFD4D4D8)
+                                color = lineColor
                             )
                         }
                     }
@@ -898,7 +980,7 @@ private fun ChannelRowItem(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = stream.gameName,
+                    text = stream.title.ifBlank { stream.gameName },
                     fontSize = 11.sp,
                     color = Color(0xFFADADB8),
                     maxLines = 1,
@@ -957,14 +1039,15 @@ private fun InventoryTab(
     campaigns: List<DropCampaignUi>,
     priorityGames: List<String>,
     excludedGames: List<String>,
+    selectedFilter: CampaignFilter,
     isRefreshing: Boolean,
+    onSelectFilter: (CampaignFilter) -> Unit,
     onTogglePriority: (String) -> Unit,
     onToggleExclude: (String) -> Unit,
     onManualClaim: (String, String, String) -> Unit,
     onOpenLink: (String) -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableStateOf(CampaignFilter.ALL) }
 
     val filtered = remember(campaigns, searchQuery, selectedFilter, priorityGames) {
         campaigns.filter { c ->
@@ -1012,7 +1095,7 @@ private fun InventoryTab(
             CampaignFilter.entries.forEach { filter ->
                 FilterChip(
                     selected = selectedFilter == filter,
-                    onClick = { selectedFilter = filter },
+                    onClick = { onSelectFilter(filter) },
                     label = { Text(filter.label, fontSize = 12.sp) },
                     modifier = Modifier.weight(1f),
                     colors = FilterChipDefaults.filterChipColors(
@@ -1075,6 +1158,7 @@ private fun InventoryTab(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PcStyleInventoryCampaignCard(
     camp: DropCampaignUi,
@@ -1085,14 +1169,7 @@ private fun PcStyleInventoryCampaignCard(
     onManualClaim: (String, String, String) -> Unit,
     onOpenLink: (String) -> Unit
 ) {
-    val expandedBenefits = remember(camp.drops) {
-        camp.drops.flatMap { drop ->
-            val list = drop.benefits.ifEmpty {
-                listOf(DropBenefitUi(drop.benefitId, drop.benefitName, drop.imageUrl))
-            }
-            list.map { benefit -> drop to benefit }
-        }
-    }
+    var channelsExpanded by remember(camp.id) { mutableStateOf(false) }
 
     Card(
         colors = CardDefaults.cardColors(
@@ -1114,7 +1191,11 @@ private fun PcStyleInventoryCampaignCard(
                     color = if (isExcluded) Color(0xFFADADB8) else Color(0xFFBF94FF),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable {
+                            onOpenLink("https://www.twitch.tv/drops/campaigns?dropID=${camp.id}")
+                        }
                 )
                 IconButton(onClick = onTogglePriority, modifier = Modifier.size(32.dp)) {
                     Icon(
@@ -1173,21 +1254,99 @@ private fun PcStyleInventoryCampaignCard(
                         fontSize = 12.sp,
                         color = Color(0xFFD4D4D8)
                     )
-                    Text(
-                        text = if (camp.aclEnabled && camp.allowedChannels.isNotEmpty()) {
-                            "Каналы: ${camp.allowedChannels.size} шт."
-                        } else {
-                            "Каналы: Все"
-                        },
-                        fontSize = 12.sp,
-                        color = Color(0xFFADADB8)
-                    )
+
+                    if (camp.aclEnabled && camp.allowedChannels.isNotEmpty()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.clickable { channelsExpanded = !channelsExpanded }
+                        ) {
+                            Text(
+                                text = "Участвуют каналы (${camp.allowedChannels.size})",
+                                fontSize = 12.sp,
+                                color = Color(0xFFBF94FF)
+                            )
+                            Icon(
+                                imageVector = if (channelsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = Color(0xFFBF94FF),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Каналы: Все стримеры категории",
+                                fontSize = 12.sp,
+                                color = Color(0xFFADADB8)
+                            )
+                            if (camp.gameSlug.isNotBlank()) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Icon(
+                                    imageVector = Icons.Default.OpenInNew,
+                                    contentDescription = "Открыть на Twitch",
+                                    tint = Color(0xFFBF94FF),
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clickable {
+                                            onOpenLink("https://www.twitch.tv/directory/category/${camp.gameSlug}?filter=drops")
+                                        }
+                                )
+                            }
+                        }
+                    }
+
                     if (!camp.isAccountConnected) {
                         Text(
                             text = "Аккаунт не привязан",
                             fontSize = 11.sp,
                             color = Color(0xFFFFCA28)
                         )
+                    }
+                }
+            }
+
+            if (camp.aclEnabled && camp.allowedChannels.isNotEmpty()) {
+                val visibleChannels = if (channelsExpanded) {
+                    camp.allowedChannels
+                } else {
+                    camp.allowedChannels.take(4)
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    visibleChannels.forEach { ch ->
+                        Surface(
+                            color = Color(0xFF25252D),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.clickable {
+                                onOpenLink("https://www.twitch.tv/${ch.login}")
+                            }
+                        ) {
+                            Text(
+                                text = ch.displayName,
+                                fontSize = 11.sp,
+                                color = Color(0xFFEFEFF1),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                    if (!channelsExpanded && camp.allowedChannels.size > 4) {
+                        Surface(
+                            color = Color(0xFF281E3B),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.clickable { channelsExpanded = true }
+                        ) {
+                            Text(
+                                text = "+ ещё ${camp.allowedChannels.size - 4}",
+                                fontSize = 11.sp,
+                                color = Color(0xFFBF94FF),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -1206,20 +1365,19 @@ private fun PcStyleInventoryCampaignCard(
                 }
             }
 
-            if (expandedBenefits.isNotEmpty()) {
+            if (camp.drops.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(10.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    itemsIndexed(
-                        items = expandedBenefits,
-                        key = { index, pair -> "${pair.first.id}_${pair.second.id}_$index" }
-                    ) { _, (drop, benefit) ->
+                    items(camp.drops, key = { it.id }) { drop ->
                         DropTileCard(
                             drop = drop,
-                            benefit = benefit,
+                            onCardClick = {
+                                onOpenLink("https://www.twitch.tv/drops/campaigns?dropID=${camp.id}")
+                            },
                             onManualClaim = {
                                 val inst = drop.dropInstanceId
                                 if (!inst.isNullOrBlank()) {
-                                    onManualClaim(inst, benefit.name, camp.gameName)
+                                    onManualClaim(inst, drop.benefitName, camp.gameName)
                                 }
                             }
                         )
@@ -1233,7 +1391,7 @@ private fun PcStyleInventoryCampaignCard(
 @Composable
 private fun DropTileCard(
     drop: TimedDropUi,
-    benefit: DropBenefitUi,
+    onCardClick: () -> Unit,
     onManualClaim: () -> Unit
 ) {
     Surface(
@@ -1243,14 +1401,17 @@ private fun DropTileCard(
             width = 1.dp,
             color = if (drop.isClaimed) Color(0xFF1B5E20) else Color(0xFF2D2D36)
         ),
-        modifier = Modifier.width(126.dp)
+        modifier = Modifier
+            .width(126.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onCardClick)
     ) {
         Column(
             modifier = Modifier.padding(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = benefit.name,
+                text = drop.benefitName,
                 fontSize = 11.sp,
                 color = Color(0xFFEFEFF1),
                 maxLines = 2,
@@ -1262,11 +1423,10 @@ private fun DropTileCard(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            val img = benefit.imageUrl ?: drop.imageUrl
-            if (!img.isNullOrBlank()) {
+            if (!drop.imageUrl.isNullOrBlank()) {
                 AsyncImage(
-                    model = img,
-                    contentDescription = benefit.name,
+                    model = drop.imageUrl,
+                    contentDescription = drop.benefitName,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .size(58.dp)
@@ -1623,7 +1783,8 @@ private fun SettingsDialog(
     onTogglePriorityOnly: (Boolean) -> Unit,
     onToggleSkipUnconnected: (Boolean) -> Unit,
     onSyncHashes: () -> Unit,
-    onDisableBatteryOpt: () -> Unit
+    onDisableBatteryOpt: () -> Unit,
+    onLogout: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1682,6 +1843,24 @@ private fun SettingsDialog(
                     ) {
                         Text("Разрешить работу без контроля батареи")
                     }
+                }
+
+                HorizontalDivider(color = Color(0xFF2B2B33))
+
+                OutlinedButton(
+                    onClick = onLogout,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Color(0xFFFF8A9B).copy(alpha = 0.5f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF8A9B))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PowerSettingsNew,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Выйти из аккаунта")
                 }
             }
         },
