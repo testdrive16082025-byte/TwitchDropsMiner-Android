@@ -137,7 +137,6 @@ data class MinerUiState(
     val priorityOnly: Boolean = false,
     val skipUnconnected: Boolean = false,
     val lastDropsFilter: CampaignFilter = CampaignFilter.ALL,
-    val sessionExpired: Boolean = false,
     val claimedSessionCount: Int = 0,
     val totalClaimedAllTime: Int = 0,
     val lastClaimedSeq: Long = 0L,
