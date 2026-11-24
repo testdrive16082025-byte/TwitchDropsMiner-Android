@@ -23,12 +23,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MinerForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateObserveJob: Job? = null
+    private var wakeLockJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var lastNotifiedClaimSeq: Long = 0L
 
@@ -50,8 +53,8 @@ class MinerForegroundService : Service() {
         }
 
         val initialNotif = buildStatusNotification(MinerRepository.state.value)
-        val fgType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        val fgType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         } else {
             0
         }
@@ -107,14 +110,26 @@ class MinerForegroundService : Service() {
     }
 
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TwitchDropsMiner::WakeLock").apply {
-            acquire(12 * 60 * 60 * 1000L)
+        if (wakeLock == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TwitchDropsMiner::WakeLock").apply {
+                setReferenceCounted(false)
+            }
+        }
+        wakeLock?.acquire(12 * 60 * 60 * 1000L)
+        if (wakeLockJob?.isActive != true) {
+            wakeLockJob = serviceScope.launch {
+                while (isActive) {
+                    delay(6 * 60 * 60 * 1000L)
+                    wakeLock?.acquire(12 * 60 * 60 * 1000L)
+                }
+            }
         }
     }
 
     private fun releaseWakeLock() {
+        wakeLockJob?.cancel()
+        wakeLockJob = null
         runCatching {
             if (wakeLock?.isHeld == true) wakeLock?.release()
         }
